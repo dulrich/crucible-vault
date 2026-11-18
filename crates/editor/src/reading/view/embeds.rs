@@ -402,7 +402,8 @@ pub(super) fn is_video_href(href: &str) -> bool {
     )
 }
 
-/// The URL host minus a leading `www.` (the whole string when it has no scheme).
+/// The URL host minus a leading `www.`: after any `scheme://` and `user@`, up to the first `/`, `?`
+/// or `#` (a schemeless string is read from its start, so its path is cut off too).
 fn card_host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);

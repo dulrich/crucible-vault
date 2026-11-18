@@ -12,10 +12,11 @@
 //!
 //! The pair is then decided ([`cv_ingest::supersede::decide`]): `Kept` (the existing note stays),
 //! `Replaced` (the incoming body replaces the note's body in place; frontmatter is kept except
-//! `access`/`complete`/`word-count`/`via`; the old text is first saved to
-//! `<state dir>/superseded/<hash>-<ms>.md`, and a failed save aborts to `Kept`), or `New` (no
-//! match; the caller creates its own note). The caller's own path is excluded from every
-//! candidate set (audit B1), so a sole clip resolves `New`, never itself.
+//! `access`/`complete`/`word-count`/`via` (rewritten), the enrich stamp (`enriched`,
+//! `enrich-model`, `enrich-miss`; cleared) and a blank `publication` (filled); the old text is
+//! first saved to `<state dir>/superseded/<hash>-<ms>.md`, and a failed save aborts to `Kept`),
+//! or `New` (no match; the caller creates its own note). The caller's own path is
+//! excluded from every candidate set (audit B1), so a sole clip resolves `New`, never itself.
 //!
 //! Finalize (audit M2): the tracker rows of the resolved note (by `note_path`, else by the
 //! incoming URLs) get the **resolved** body's `access`/`complete`, and are ticked (`status = x`)

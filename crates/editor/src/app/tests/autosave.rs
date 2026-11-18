@@ -2,34 +2,14 @@
 
 use iced::widget::text_editor::{Action, Edit};
 
+use super::support::{setup, type_x};
 use super::*;
-use crate::message::{ExplorerMsg, SourceMsg};
+use crate::message::SourceMsg;
 use crate::panes;
 use crate::source::SaveOutcome;
 
-pub(super) fn setup(notes: &[&str]) -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
-    let (tmp, d) = fake();
-    let d = Arc::new(d);
-    for p in notes {
-        d.create_note(p, "body").expect("create");
-    }
-    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
-    let mut app = App::new(Some(dc), None);
-    app.queue_rpcs();
-    for p in notes {
-        let _ = app.send(Message::Explorer(ExplorerMsg::Open((*p).to_owned())));
-    }
-    (tmp, d, app)
-}
-
 fn tab<'a>(app: &'a mut App, path: &str) -> &'a mut crate::source::SourceBuffer {
     app.doc_mut(path).expect("open")
-}
-
-fn type_x(app: &mut App) {
-    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
-        Edit::Insert('x'),
-    ))));
 }
 
 fn dirty_in_place(app: &mut App, path: &str) {

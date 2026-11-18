@@ -1,7 +1,7 @@
 //! Round 11 WP-1 (Decision 1): a deletion carrying `replaced_by` (auto-file absorbed the note)
 //! lands the open tabs on the absorbing note instead of "file deleted on disk".
 
-use super::unsaved_dialog::{setup, type_x};
+use super::support::{setup, type_x};
 use super::*;
 use cv_protocol::{ChangeKind, Origin};
 

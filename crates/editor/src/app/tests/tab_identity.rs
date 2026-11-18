@@ -1,7 +1,7 @@
 //! Plan WP-R5 (review E3): a note tab holds its note id and reads its path from the document
 //! store, so a move updates no tab; a delete confirmed for an open note goes by its id.
 
-use super::shared_docs::setup;
+use super::support::setup;
 use super::*;
 use crate::app::{Place, TabKind};
 use crate::message::PanesMsg;

@@ -1,6 +1,7 @@
 //! Plan WP-R4 (review E1, E2): note opens, reloads and reconnect resyncs settle off the UI
 //! thread, and a stale open or settle completion is dropped.
 
+use super::support::queued;
 use super::*;
 use crate::app::{NoteId, RpcExec};
 use crate::message::{ExplorerMsg, PanesMsg};
@@ -17,13 +18,6 @@ fn setup(notes: &[&str]) -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
 /// `update` only (no pump): its RPC completions stay queued.
 fn open_unpumped(app: &mut App, path: &str) {
     let _ = app.update(Message::Explorer(ExplorerMsg::Open(path.to_owned())));
-}
-
-fn queued(app: &mut App) -> Vec<Message> {
-    match &mut app.rpc_exec {
-        RpcExec::Queue(q) => q.drain(..).collect(),
-        RpcExec::Pool => Vec::new(),
-    }
 }
 
 fn tabs_of(app: &App, path: &str) -> usize {

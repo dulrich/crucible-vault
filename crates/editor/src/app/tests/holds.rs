@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use cv_protocol::JobStatus;
 
-use super::unsaved_dialog::{setup, type_x};
+use super::support::{notice, setup, type_x};
 use super::*;
 use crate::app::holds::{Hold, OVERLAY_DELAY};
 use crate::message::SourceMsg;
@@ -26,10 +26,6 @@ fn job(id: &str, status: JobState, held: Option<&str>) -> Notification {
 
 fn feed(app: &mut App, n: Notification) {
     let _ = app.send(Message::Status(StatusMsg::Notification(n)));
-}
-
-fn notice(app: &App) -> Option<&str> {
-    app.status.notice.as_ref().map(|n| n.text.as_str())
 }
 
 #[test]

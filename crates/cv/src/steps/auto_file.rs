@@ -42,7 +42,7 @@
 //!    enriched by `file-as-kind`'s last step on the moved path; a trashed clip never is.
 //!
 //! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|transcript|new|
-//! missing`), `target`, `kind`, `child_job_id`, `enrich_job_id`. A clip that already sits in its kind's folder with
+//! missing|skipped`), `target`, `kind`, `child_job_id`, `enrich_job_id`. A clip that already sits in its kind's folder with
 //! all of the kind's tags spawns no child and reports `kind` with `filed = "already"` (`action`
 //! unchanged). The publication of the record that gave the kind is written to the clip when
 //! absent, before the child is spawned.

@@ -75,7 +75,7 @@ pub struct VisRun {
     pub(crate) display: Display,
     pub sep: Sep,
     /// Copied before the text when the run is not where the selection starts (list markers,
-    /// property keys, footnote numbers).
+    /// footnote numbers; a property key is its own run and carries none).
     pub prefix: String,
     /// An image's alt text (no widget).
     pub image: bool,

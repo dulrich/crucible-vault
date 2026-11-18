@@ -4,7 +4,7 @@
 use iced::Point;
 use iced::widget::pane_grid::Pane;
 
-use super::shared_docs::{setup, type_x};
+use super::support::{setup, type_x};
 use super::*;
 use crate::app::tab_drag::DropTarget;
 use crate::message::PanesMsg;

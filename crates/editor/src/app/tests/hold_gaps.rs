@@ -4,7 +4,8 @@
 use cv_protocol::JobStatus;
 use iced::widget::text_editor::Action;
 
-use super::unsaved_dialog::{dialog_notes, setup, type_x};
+use super::support::{notice, setup, type_x};
+use super::unsaved_dialog::dialog_notes;
 use super::*;
 use crate::dialog::{Dialog, DialogMsg, Discard, LossReason};
 use crate::explorer::FileOp;
@@ -28,10 +29,6 @@ fn job(id: &str, status: JobState, held: &str) -> Notification {
 
 fn feed(app: &mut App, n: Notification) {
     let _ = app.send(Message::Status(StatusMsg::Notification(n)));
-}
-
-fn notice(app: &App) -> Option<&str> {
-    app.status.notice.as_ref().map(|n| n.text.as_str())
 }
 
 fn clear_notice(app: &mut App) {

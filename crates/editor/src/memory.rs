@@ -52,7 +52,7 @@ pub fn should_trim(
 ) -> bool {
     let quiet = now.saturating_duration_since(last_activity) >= QUIET_PERIOD;
     let fresh = last_trim.is_none_or(|t| t <= last_activity);
-    quiet && fresh && retained > cv_malloc::TRIM_RETAINED_THRESHOLD
+    quiet && fresh && cv_malloc::above(retained, cv_malloc::TRIM_RETAINED_THRESHOLD)
 }
 
 /// App-owned counts, refreshed by [`Memory::capture`].

@@ -152,9 +152,11 @@ macro_rules! step_kinds {
     };
 }
 
-// A2: every pipeline step mutates (fails closed) except `link_scan`, which writes only
-// `state.db`. `x_discover`/`x_backfill` ensure metadata inline and append to source notes'
-// `x-metadata` lists (plan `v0-automation-pipelines` WP-5), so they mutate.
+// A2: a pipeline step counts as mutating (fails closed) except `guard`, `run_action` (enqueues a
+// child), `search_upsert` / `search_delete` (the search index), `link_scan`, `intake_finalize`
+// and `cancel_source_intake` (`state.db` only). `x_discover`/`x_backfill` ensure metadata inline
+// and append to source notes' `x-metadata` lists (plan `v0-automation-pipelines` WP-5), so they
+// mutate.
 step_kinds! {
     Guard = "guard", false, false;
     Capture = "capture", true, false;

@@ -1,31 +1,9 @@
 //! Unsaved-edits dialog; missing-file conflict (all `FakeDaemon`).
 
-use iced::widget::text_editor::{Action, Edit};
-
+use super::support::{setup, type_x};
 use super::*;
 use crate::dialog::{DialogMsg, LossReason};
-use crate::message::{ExplorerMsg, PaletteMsg, SourceMsg, SwitcherMsg};
-
-pub(super) fn setup(notes: &[&str]) -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
-    let (tmp, d) = fake();
-    let d = Arc::new(d);
-    for p in notes {
-        d.create_note(p, "body").expect("create");
-    }
-    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
-    let mut app = App::new(Some(dc), None);
-    app.queue_rpcs();
-    for p in notes {
-        let _ = app.send(Message::Explorer(ExplorerMsg::Open((*p).to_owned())));
-    }
-    (tmp, d, app)
-}
-
-pub(super) fn type_x(app: &mut App) {
-    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
-        Edit::Insert('x'),
-    ))));
-}
+use crate::message::{PaletteMsg, SourceMsg, SwitcherMsg};
 
 pub(super) fn dialog_notes(app: &App) -> Vec<(String, LossReason)> {
     app.dialog

@@ -5,7 +5,8 @@ use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use super::rename_order::{Order, deliver};
-use super::unsaved_dialog::{save, setup, type_x};
+use super::support::{feed, setup, type_x};
+use super::unsaved_dialog::save;
 use super::*;
 use crate::app::NoteId;
 use crate::daemon::Topic;
@@ -16,12 +17,6 @@ fn file_changes(rx: &Receiver<Notification>) -> Vec<Notification> {
     rx.try_iter()
         .filter(|n| matches!(n, Notification::FileChanged { .. }))
         .collect()
-}
-
-fn feed(app: &mut App, ns: Vec<Notification>) {
-    for n in ns {
-        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
-    }
 }
 
 /// Audit E1: a daemon-side move delivers its full pair (`Renamed { from }`, then the source

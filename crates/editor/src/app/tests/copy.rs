@@ -2,7 +2,7 @@
 //! confirmation and find-paint interplay) and plan round-22 WP-2 (the app side of inline-code
 //! copy — a "Copied" status notice).
 
-use super::unsaved_dialog::setup;
+use super::support::setup;
 use super::*;
 use crate::message::ReadingMsg;
 use crate::reading::ViewMode;

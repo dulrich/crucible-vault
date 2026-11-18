@@ -947,7 +947,7 @@ pub enum Notification {
     OpenRequested {
         path: String,
     },
-    /// Reserved for plan B's view evaluator (hosted on the daemon's view thread).
+    /// The listed views changed on the daemon's view thread; a client re-evaluates them.
     ViewsInvalidated {
         view_ids: Vec<String>,
     },

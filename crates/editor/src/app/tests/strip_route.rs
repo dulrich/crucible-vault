@@ -12,7 +12,7 @@ use iced::keyboard::{self, Key, Location, Modifiers, key};
 use iced::widget::pane_grid::Pane;
 use iced::{Event, Point, Rectangle, Size, Vector};
 
-use super::shared_docs::setup;
+use super::support::setup;
 use super::*;
 use crate::message::ReadingMsg;
 use crate::reading::ViewMode;

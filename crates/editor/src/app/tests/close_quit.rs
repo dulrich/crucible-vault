@@ -70,7 +70,8 @@ mod in_flight {
 
     use super::super::*;
 
-    use super::super::autosave::{in_flight, land, setup};
+    use super::super::autosave::{in_flight, land};
+    use super::super::support::setup;
     use crate::panes;
     use crate::source::SaveOutcome;
 
@@ -135,7 +136,8 @@ mod duplicates {
     use super::super::*;
     use crate::app::Tab;
 
-    use super::super::shared_docs::{duplicated, saved, setup, type_x, views};
+    use super::super::shared_docs::{duplicated, saved, views};
+    use super::super::support::{setup, type_x};
 
     #[test]
     fn closing_one_duplicate_keeps_the_others_document_and_reading_state() {
@@ -213,7 +215,8 @@ mod duplicates {
 
 mod loss_dialog {
 
-    use super::super::unsaved_dialog::{dialog_notes, save, setup, type_x};
+    use super::super::support::{setup, type_x};
+    use super::super::unsaved_dialog::{dialog_notes, save};
     use super::super::*;
     use crate::dialog::{Dialog, DialogMsg, Discard, LossReason};
     use crate::header::QuickSwitchOpen;

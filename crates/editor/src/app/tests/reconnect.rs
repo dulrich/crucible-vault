@@ -2,8 +2,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use iced::widget::text_editor::{Action, Edit};
-
+use super::support::type_x;
 use super::*;
 use crate::daemon::Connector;
 use crate::message::{ExplorerMsg, SourceMsg};
@@ -37,12 +36,6 @@ fn setup(notes: &[&str], fails: u32) -> (tempfile::TempDir, Arc<FakeDaemon>, App
         let _ = app.send(Message::Explorer(ExplorerMsg::Open((*p).to_owned())));
     }
     (tmp, d, app)
-}
-
-fn type_x(app: &mut App) {
-    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
-        Edit::Insert('x'),
-    ))));
 }
 
 fn reconnect(app: &mut App) {

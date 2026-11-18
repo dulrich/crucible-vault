@@ -1,7 +1,8 @@
 //! glibc allocator controls and statistics (plan memory-instrumentation-and-reduction WP-M1):
 //! the arena cap, `malloc_trim` and `mallinfo2`, plus process-start environment defaults
-//! (`set_env_default`). This crate holds the workspace's only `unsafe`;
-//! on non-Linux/non-glibc targets every function is a no-op or returns zeros.
+//! (`set_env_default`). This crate holds the workspace's only `unsafe`; on non-Linux/non-glibc
+//! targets every glibc function is a no-op or returns zeros (`set_env_default` still sets the
+//! variable).
 #![allow(unsafe_code)]
 
 /// Allocator totals in bytes, summed over every arena.
@@ -158,22 +159,10 @@ impl Figure {
     }
 }
 
-/// Whether a figure warrants a trim: strictly above [`TRIM_RETAINED_THRESHOLD`].
-#[must_use]
-pub fn over_threshold(figure: u64) -> bool {
-    above(figure, TRIM_RETAINED_THRESHOLD)
-}
-
 /// Whether `figure` is strictly above a caller-chosen `threshold`.
 #[must_use]
 pub fn above(figure: u64, threshold: u64) -> bool {
     figure > threshold
-}
-
-/// The release entry for callers content with the default threshold: [`release_above`] with
-/// [`TRIM_RETAINED_THRESHOLD`] (32 MiB; the editor's).
-pub fn release(figure: Figure) -> Option<Release> {
-    release_above(figure, TRIM_RETAINED_THRESHOLD)
 }
 
 /// The one release implementation: reads `figure` and trims when it is strictly above the
@@ -250,10 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn over_threshold_is_strict() {
-        assert!(!over_threshold(0));
-        assert!(!over_threshold(TRIM_RETAINED_THRESHOLD));
-        assert!(over_threshold(TRIM_RETAINED_THRESHOLD + 1));
+    fn above_is_strict() {
         assert!(!above(5, 5) && above(6, 5) && !above(4, 5));
     }
 

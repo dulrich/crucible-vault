@@ -3,8 +3,8 @@
 
 use iced::keyboard::{Modifiers, key::Named};
 
-use super::shared_docs::setup;
 use super::strip::press;
+use super::support::setup;
 use super::*;
 use crate::message::{PaletteMsg, PanelsMsg, SwitcherMsg};
 use crate::settings::editor_prefs::SearchLocation;

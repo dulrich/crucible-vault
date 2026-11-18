@@ -1,14 +1,8 @@
 //! Round 9 WP-3 (Decision 4): a daemon-side move retargets the open tabs; MRU tab close.
 
-use super::unsaved_dialog::{setup, type_x};
+use super::support::{feed, setup, type_x};
 use super::*;
 use crate::message::{ExplorerMsg, TabsMsg};
-
-fn feed(app: &mut App, ns: Vec<Notification>) {
-    for n in ns {
-        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
-    }
-}
 
 fn active_path(app: &App) -> Option<String> {
     app.active_tab()

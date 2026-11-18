@@ -305,7 +305,10 @@ impl App {
         self.last_trim = Some(now);
         Task::future(async move {
             match tokio::task::spawn_blocking(|| {
-                cv_malloc::release(cv_malloc::Figure::ArenaRetained)
+                cv_malloc::release_above(
+                    cv_malloc::Figure::ArenaRetained,
+                    cv_malloc::TRIM_RETAINED_THRESHOLD,
+                )
             })
             .await
             {

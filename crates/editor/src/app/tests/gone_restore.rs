@@ -5,7 +5,7 @@
 use std::sync::mpsc::Receiver;
 
 use super::shared_docs::{duplicated, views};
-use super::unsaved_dialog::{setup, type_x};
+use super::support::{queued, setup, type_x};
 use super::*;
 use crate::app::NoteId;
 use crate::daemon::Topic;
@@ -222,13 +222,6 @@ fn gone_then_recreated_silently(app: &mut App, d: &FakeDaemon, path: &str, body:
 fn land_unpumped(app: &mut App, d: &FakeDaemon, job: crate::source::SaveJob) {
     let outcome = job.run(d);
     let _ = app.update(job.done(outcome));
-}
-
-fn queued(app: &mut App) -> Vec<Message> {
-    match &mut app.rpc_exec {
-        crate::app::RpcExec::Queue(q) => q.drain(..).collect(),
-        crate::app::RpcExec::Pool => Vec::new(),
-    }
 }
 
 /// Case 1: an id-less event restores a clean and a dirty gone document; a later save lands on

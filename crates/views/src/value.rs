@@ -214,8 +214,8 @@ fn as_date(v: &Value) -> Option<NaiveDateTime> {
     }
 }
 
-/// `==`: same-type equality; dates compare with ISO text; file handles/links by path; a number
-/// equals a numeric string only if both parse equal.
+/// `==`: same-type equality (a number never equals a string); dates compare as dates, text read
+/// as ISO; file handles, notes and links compare by path, also against text; lists element-wise.
 pub fn loose_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,

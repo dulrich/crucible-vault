@@ -2,7 +2,7 @@
 
 use iced::keyboard::{Event, Key, Location, Modifiers, key::Named, key::Physical};
 
-use super::shared_docs::{setup, type_x};
+use super::support::{setup, type_x};
 use super::*;
 use crate::reading::tests::{app_on, setup as reading_setup};
 
