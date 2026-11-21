@@ -509,8 +509,8 @@ fn example_config_files_load_cleanly() {
     assert!(set.errors().is_empty(), "{:?}", set.errors());
     assert_eq!(
         set.armed_actions().count(),
-        47,
-        "46 + the built-in media cleanup (intake-enrich-recover removed by plan abstract-removal-confidence-deletion WP-2)"
+        48,
+        "47 + the built-in media cleanup (intake-enrich-recover removed in WP-2, intake-abstract-strip added in WP-6 of plan abstract-removal-confidence-deletion)"
     );
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
     // Plan sources-publication-model WP-1: the example is publication-shape.

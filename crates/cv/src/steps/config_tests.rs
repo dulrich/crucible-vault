@@ -14,8 +14,8 @@ fn example_config_arms_every_action() {
     assert!(c.errors().is_empty(), "{:?}", c.errors());
     assert_eq!(
         c.armed_actions().count(),
-        47,
-        "46 + the built-in media cleanup (intake-enrich-recover removed by plan abstract-removal-confidence-deletion WP-2)"
+        48,
+        "47 + the built-in media cleanup (intake-enrich-recover removed in WP-2, intake-abstract-strip added in WP-6 of plan abstract-removal-confidence-deletion)"
     );
     for id in [
         "period.open",
