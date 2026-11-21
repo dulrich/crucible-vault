@@ -10,8 +10,10 @@
 //! the embed and `## Transcript` (e.g. a clipped description) is tolerated and dropped (Crucible
 //! required the header directly after the embed; plan round-19-yt-cleanup-intake WP-2 deletes the
 //! description, kept in the `_yt_metadata` note), leading `%% … %%` managed regions are skipped
-//! and kept, the localized `[![](img)](url)` embed form is accepted, and an already-stripped body
-//! (no embed) is cleaned too. Nothing
+//! and kept, the localized `[![](img)](url)` embed form is accepted, an already-stripped body
+//! (no embed) is cleaned too, and on a YouTube clip (frontmatter `source` a YouTube video URL) the
+//! `## Transcript` heading is kept (plan abstract-removal-confidence-deletion WP-2: Crucible
+//! dropped it; the transcript refine and the section locator need it). Nothing
 //! Obsidian-induced to drop (the `vault.modify` write is the caller's).
 //!
 //! [`transcript_evidence`] (plan intake-followups-mail-youtube WP-4, cv's own — Crucible ticked
@@ -150,8 +152,10 @@ fn scan_prefix(lines: &[Line<'_>]) -> Option<(usize, usize)> {
 }
 
 /// Whether a managed prefix links the note's transcript (`[[#Transcript]]` or
-/// `[[#Transcript|alias]]`, case-insensitive) — the ToC callout `intake_enrich` writes. Plan
-/// round-20-transcript-heading-auto-holds WP-1.
+/// `[[#Transcript|alias]]`, case-insensitive) — the ToC of the legacy top block `intake_enrich`
+/// wrote before plan abstract-removal-confidence-deletion WP-2. Plan
+/// round-20-transcript-heading-auto-holds WP-1; now only a legacy signal (new notes carry no such
+/// link, and their heading is kept by [`cleanup_youtube_transcript`] instead).
 #[must_use]
 pub fn prefix_links_transcript(prefix: &str) -> bool {
     TRANSCRIPT_LINK_RE
@@ -159,10 +163,13 @@ pub fn prefix_links_transcript(prefix: &str) -> bool {
         .is_some_and(|r| r.is_match(prefix))
 }
 
-/// Re-insert the `## Transcript` heading a cleanup dropped: when the note's managed prefix links
-/// `#Transcript` yet the body has no such heading, put `## Transcript` and a blank line directly
-/// after the prefix. `None` when there is no prefix, no link, or the heading exists (so a second
-/// pass is `None`). Plan round-20-transcript-heading-auto-holds WP-1.
+/// Re-insert the `## Transcript` heading a pre-WP-2 cleanup dropped: when the note's managed
+/// prefix (a legacy top block) links `#Transcript` yet the body has no such heading, put
+/// `## Transcript` and a blank line directly after the prefix. `None` when there is no prefix, no
+/// link, or the heading exists (so a second pass is `None`). Plan
+/// round-20-transcript-heading-auto-holds WP-1. Since plan abstract-removal-confidence-deletion
+/// WP-2 the cleanup no longer drops a clip's heading, so only legacy notes need this, and the
+/// legacy top-block strip runs it before removing the block (its link is the only evidence).
 #[must_use]
 pub fn restore_transcript_heading(content: &str) -> Option<String> {
     let (_, body) = ofm::frontmatter::split_frontmatter(content);
@@ -235,7 +242,8 @@ pub fn strip_youtube_preamble(body: &str) -> Option<String> {
 /// Plan round-19-yt-cleanup-intake WP-2: the embed is found after leading `%% … %%` managed
 /// regions (kept byte-identical), in either embed form; the embed and the clipped description are
 /// dropped; a body already stripped (`## Transcript` directly after the managed prefix) is cleaned
-/// too.
+/// too. The heading is kept when the note is a YouTube clip ([`is_youtube_clip`]) or (legacy) its
+/// managed prefix links it; otherwise it is dropped as in Crucible.
 pub fn cleanup_youtube_transcript(content: &str) -> String {
     let (_, body) = ofm::frontmatter::split_frontmatter(content);
     let fm_text = &content[..content.len() - body.len()];
@@ -273,8 +281,9 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
     if !prefix.is_empty() {
         result.push('\n');
     }
-    if prefix_links_transcript(prefix) {
-        // Plan round-20-transcript-heading-auto-holds WP-1: the ToC links the heading — keep it.
+    if is_youtube_clip(content) || prefix_links_transcript(prefix) {
+        // Plan abstract-removal-confidence-deletion WP-2 (c): a clip keeps its heading without a
+        // ToC link (round-20 WP-1 kept it only when the legacy ToC linked it).
         result.push_str(&body[shape.header_start..shape.header_end]);
         result.push('\n');
     }
@@ -284,6 +293,16 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
         result.push_str(trailing);
     }
     format!("{fm_text}{result}\n")
+}
+
+/// Whether `content`'s frontmatter `source` is a YouTube video URL — a clipping of the video (the
+/// same identity `yt_clip_tidy` and the intake kinds use). A note that merely embeds or links a
+/// video has another `source` (or none), so it never counts.
+#[must_use]
+pub fn is_youtube_clip(content: &str) -> bool {
+    crate::FrontmatterDoc::new(content)
+        .get_str_trimmed("source")
+        .is_some_and(|s| cv_text::url_canon::is_youtube_video(&s))
 }
 
 /// Fewest `**m:ss**` paragraphs under `## Transcript` that count as a transcript.
@@ -403,7 +422,16 @@ mod tests {
         let out = cleanup_youtube_transcript(src);
         assert_eq!(
             out,
-            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\nhello there\n\nsecond [link](x) part\n\n## Notes\nmine\n"
+            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\n## Transcript\n\nhello there\n\nsecond [link](x) part\n\n## Notes\nmine\n"
+        );
+        // Without a YouTube `source` (not a clip) the heading is dropped as in Crucible.
+        let other = src.replace(
+            "source: https://youtu.be/dQw4w9WgXcQ",
+            "source: https://ex.test/a",
+        );
+        assert_eq!(
+            cleanup_youtube_transcript(&other),
+            "---\nsource: https://ex.test/a\n---\nhello there\n\nsecond [link](x) part\n\n## Notes\nmine\n"
         );
     }
 
@@ -413,7 +441,7 @@ mod tests {
         let out = cleanup_youtube_transcript(src);
         assert_eq!(
             out,
-            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\nhello there\n\nsecond\n"
+            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\n## Transcript\n\nhello there\n\nsecond\n"
         );
     }
 
@@ -456,7 +484,10 @@ mod tests {
             "{fm}{ENRICHED}[![](a.jpg)](https://youtu.be/dQw4w9WgXcQ)\nDesc.\n\n## Transcript\n\n**0:01** [Music] hi\n\n**0:04** there\n"
         );
         let out = cleanup_youtube_transcript(&src);
-        assert_eq!(out, format!("{fm}{ENRICHED}\nhi\n\nthere\n"));
+        assert_eq!(
+            out,
+            format!("{fm}{ENRICHED}\n## Transcript\n\nhi\n\nthere\n")
+        );
         assert_eq!(
             cleanup_youtube_transcript(&out),
             out,
@@ -480,8 +511,10 @@ mod tests {
         )
     }
 
+    /// Plan abstract-removal-confidence-deletion WP-2 (c): a clip keeps its heading whether or not
+    /// a legacy prefix links it; a non-clip keeps it only on the legacy link.
     #[test]
-    fn cleanup_keeps_heading_when_prefix_links_it() {
+    fn cleanup_keeps_heading_on_clip_or_legacy_link() {
         let out = cleanup_youtube_transcript(&toc_clip(TOC));
         assert_eq!(
             out,
@@ -497,7 +530,14 @@ mod tests {
         assert!(out.contains("\n## Transcript\n\nhi\n"), "{out}");
         let plain = TOC.replace("[[#Transcript]]", "no link");
         let out = cleanup_youtube_transcript(&toc_clip(&plain));
-        assert_eq!(out, format!("{FM}{plain}\nhi\n\nthere\n\nmore\n"));
+        assert_eq!(
+            out,
+            format!("{FM}{plain}\n## Transcript\n\nhi\n\nthere\n\nmore\n")
+        );
+        let bare = toc_clip("").replacen(FM, "", 1);
+        assert_eq!(cleanup_youtube_transcript(&bare), "hi\n\nthere\n\nmore\n");
+        let linked = toc_clip(TOC).replacen(FM, "", 1);
+        assert!(cleanup_youtube_transcript(&linked).contains("\n## Transcript\n\nhi\n"));
     }
 
     #[test]

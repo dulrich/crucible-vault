@@ -468,16 +468,16 @@ type = "intake_enrich"       # one LLM structure + cleanup pass; skips an alread
 [[action.steps]]
 type = "search_upsert"       # last: indexes the refined + enriched text
 
-# Intake enrich (plan intake-auto-enrich WP-3, D29): one LLM pass over one note — a collapsed top
-# block, chapter headings in heading-less bodies, and one folded `[!removed]-` callout holding what
-# the cleanup marked (nothing is deleted). Filed clips get it as a step of `clip-enrich`, after
+# Intake enrich (plan intake-auto-enrich WP-3, D29): one LLM pass over one note — chapter headings
+# in heading-less bodies and one folded `[!removed]-` callout holding what the cleanup marked
+# (nothing is deleted; no top block since plan abstract-removal-confidence-deletion WP-2). Filed clips get it as a step of `clip-enrich`, after
 # `transcript_refine` and before the final search refresh (the chain is already at the depth limit);
 # new tracker blog and mail notes get it as a child job enqueued by `track_blogs` / `track_mail`
 # once the note is final. Same `clip::enrich` key as `clip-enrich`, so enrich runs serialize on that
 # key and slow enrichment never occupies more than one of the 3 general slots (the 1 fast slot is
 # separate). `force` re-runs an enriched note. `transcript_refine` runs first (plan
-# youtube-transcript-auto-refine, D30): a refined YouTube note is re-enriched forced, so the top
-# block and fold are built on the refined text.
+# youtube-transcript-auto-refine, D30): a refined YouTube note is re-enriched forced, so the
+# headings and fold are built on the refined text.
 [[action]]
 id = "intake-enrich"
 hold = true
@@ -514,19 +514,6 @@ default = "20"
 [[action.steps]]
 type = "intake_enrich"
 scope = "backfill"
-
-# One-shot recovery (plan intake-removals-sources-rescan WP-7): un-stamps long notes whose `enriched`
-# stamp has neither a top block nor a fold (a stamp a superseded body kept), bounded by the
-# `enrich-miss` cap; it enqueues nothing and ignores `limit`. Run `intake-enrich-backfill` afterwards
-# so the un-stamped notes are enriched again. A second run finds nothing more to recover.
-[[action]]
-id = "intake-enrich-recover"
-label = "Intake: recover enrich stamps"
-group = "Ingest"
-resources = { note = false, keys = ["intake::enrich-backfill"] }
-[[action.steps]]
-type = "intake_enrich"
-scope = "recover"
 
 # One-shot YouTube clip backfill (plan round-19-yt-cleanup-intake WP-3): over every indexed note whose
 # `source` is a YouTube URL (outside `.trash/`, `_yt_metadata/`, `_raw_transcript/`, `_custom/`) it

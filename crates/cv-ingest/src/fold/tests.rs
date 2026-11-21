@@ -24,7 +24,7 @@ fn sp(kind: SpanKind, first: &str, last: &str) -> Span {
 fn fold_only(body: &str, spans: Vec<Span>) -> String {
     let mut o = EnrichOutput::default();
     o.spans = spans;
-    enrich(body, &o, &[], EnrichOpts { top_block: false }).text
+    enrich(body, &o, &[], EnrichOpts { headings: false }).text
 }
 
 /// (body, spans) round-trip fixtures: start, middle between blanks, end, a blank inside, two

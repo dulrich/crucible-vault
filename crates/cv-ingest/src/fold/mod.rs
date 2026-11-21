@@ -9,7 +9,7 @@ mod resolve;
 mod tests;
 mod trim;
 
-pub(crate) use layout::{FOLD_HEADER, closing, quote, write_fold};
+pub(crate) use layout::{FOLD_HEADER, closing, quote, unquote, write_fold};
 pub use layout::{FOLD_KIND, FOLD_MARKER};
 pub(crate) use meta::{Anchor, anchor_of, parse_meta, render_meta};
 pub use resolve::{

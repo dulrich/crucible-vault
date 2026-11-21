@@ -1,12 +1,13 @@
 //! Step module `intake_enrich` (plan `intake-auto-enrich` WP-3; measurements and the design in
 //! `docs/spikes/auto-intake-llm/FINDINGS.md`, decision D29): one LLM structure + cleanup pass over
-//! an intake note, applied by `cv_ingest::enrich` — a collapsed top block, chapter headings in
-//! heading-less bodies, and **one folded `[!removed]-` callout** for what the cleanup marks. The
-//! model never rewrites text and nothing is deleted.
+//! an intake note, applied by `cv_ingest::enrich` — chapter headings in heading-less bodies and
+//! **one folded `[!removed]-` callout** for what the cleanup marks. The model never rewrites text
+//! and nothing is deleted. No top block is written (plan abstract-removal-confidence-deletion
+//! WP-2, Decision 1); every write this step makes removes a legacy `[!abstract]` one.
 //!
 //! | key | values | default |
 //! |---|---|---|
-//! | `scope` | `"note"` (the run's active note) \| `"backfill"` (enqueue `intake-enrich` per unenriched intake note) \| `"recover"` (recovery, below) | `"note"` |
+//! | `scope` | `"note"` (the run's active note) \| `"backfill"` (enqueue `intake-enrich` per unenriched intake note) \| `"strip-top"` (legacy top-block strip, below) | `"note"` |
 //! | `force` | re-run on a note that already carries `enriched`; a job param `force` wins | `false` |
 //! | `agent` | the `agents.toml` id returning the JSON answer | `"intake-enrich"` |
 //! | `limit` | backfill only: notes enqueued per run, newest first (> 0) | `20` |
@@ -15,15 +16,20 @@
 //! value skips (no model call) unless forced; call the agent through the `agent` step's provider
 //! path (the same failure mapping: transport/5xx/429 → `Deferred`, missing key → `Failed{NoApiKey}`,
 //! truncation → `Failed`); parse the answer (unparseable → `Failed`, nothing written); apply
-//! [`cv_ingest::enrich::enrich`] (bodies under [`SHORT_WORDS`] words get the fold but no top
-//! block); set `enriched: <date>` and `enrich-model: <provider:model>` and remove `enrich-miss`;
+//! [`cv_ingest::enrich::enrich`] (bodies under [`SHORT_WORDS`] words get the fold but no
+//! headings); set `enriched: <date>` and `enrich-model: <provider:model>` and remove `enrich-miss`;
 //! write with the hash read *before* the model call (I2: an edit during the call is a conflict,
 //! never a clobber).
 //!
-//! **Miss rule** (plan `intake-removals-sources-rescan` WP-7): a *miss* is a body of
-//! [`SHORT_WORDS`] words or more whose edit produced neither a top block nor a fold. A miss
-//! stamps nothing and writes no body: only `enrich-miss` = previous count + 1 (absent or
-//! non-numeric reads as 0) is written, with the pre-call hash. Short notes are never a miss.
+//! **Miss rule** (plan `intake-removals-sources-rescan` WP-7, restated by plan
+//! abstract-removal-confidence-deletion WP-2 (b)): a *miss* is a body of [`SHORT_WORDS`] words or
+//! more whose answer requested anchors (span `first_line`/`last_line` pairs, `content_ends_after`,
+//! chapter `starts_at` the pass evaluated) and resolved none of them. An answer that requested no
+//! anchors, or resolved at least one (a span whose anchors are lines an earlier run already folded
+//! counts, `anchors_already_folded`), stamps. A miss stamps nothing and changes the body only by
+//! removing a legacy top block ([`enrich::strip_top`]); `enrich-miss` = previous count + 1 (absent
+//! or non-numeric reads as 0) is written, with the pre-call hash. Short notes are never a miss. An
+//! unparseable answer or a failed call stays a step failure with nothing written.
 //! The backfill holds back notes whose `enrich-miss` is at or over [`ENRICH_MISS_CAP`] (counted
 //! as `miss_capped`; `refine_pending` picks are left alone); `force` runs a note regardless.
 //!
@@ -42,17 +48,24 @@
 //! follows. The batch is
 //! newest first over the union, at most `limit`, no duplicates.
 //!
-//! **Recovery** (`scope = "recover"`; nothing is enqueued): for every intake
-//! candidate with a non-blank `enriched`, a body of [`SHORT_WORDS`] words or more and neither
-//! generated block, remove `enriched`, `enrich-model` and `enrich-miss` with a CAS write (a lost
-//! CAS is counted). A second run recovers 0. A `recover` step key or job param is refused with a
-//! pointer to `scope = "recover"`.
+//! **Strip-top scope** (`scope = "strip-top"`; no model call, nothing enqueued; plan
+//! abstract-removal-confidence-deletion WP-2 (d)): for every user markdown note carrying a legacy
+//! top block ([`enrich::has_legacy_top`]: a managed `%% cv-enrich %%` block outside code fences
+//! whose callout is `> [!abstract]`), a YouTube clip first gets back a `## Transcript` heading the
+//! block's ToC still links ([`cv_note::restore_transcript_heading`]; the link is gone after the
+//! strip), then the block is removed ([`enrich::strip_top`]) with a CAS write (a lost CAS is
+//! counted). `enriched`, inserted headings, folds and fold metadata are untouched; a second run
+//! writes nothing.
+//!
+//! **Recovery is retired** (same plan, (e)): `scope = "recover"`, a `recover` step key and a
+//! `recover` job param are refused. After the strip a correctly enriched note can carry no
+//! generated block, which is exactly what recovery un-stamped.
 //!
 //! Outcome vars: `skipped` (`"already enriched"`), `enriched`, `anchors_resolved`,
-//! `anchors_dropped`, `lines_folded`, `banners_folded`, `fold_refused_over_half`, `top_block`,
+//! `anchors_dropped`, `anchors_already_folded`, `lines_folded`, `banners_folded`, `fold_refused_over_half`,
 //! `headings_inserted`, `spans_folded`, `words`; on a miss `enriched: false`, `miss: true`,
-//! `enrich_miss`; backfill: `candidates`, `enqueued`, `enqueue_failed`, `miss_capped`; recovery:
-//! `candidates`, `recovered`, `recover_conflict`.
+//! `enrich_miss`; backfill: `candidates`, `enqueued`, `enqueue_failed`, `miss_capped`; strip-top:
+//! `candidates` (notes scanned), `stripped`, `heading_restored`, `strip_conflict`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -71,22 +84,27 @@ use super::{StepCtx, StepError, StepModule, StepOutcome};
 pub(crate) const ENRICH_ACTION: &str = "intake-enrich";
 const DEFAULT_AGENT: &str = "intake-enrich";
 const DEFAULT_LIMIT: usize = 20;
-/// Bodies under this many words are cleaned (fold) but get no top block or headings.
+/// Bodies under this many words are cleaned (fold) but get no headings, and are never a miss.
 pub(crate) const SHORT_WORDS: usize = 150;
 /// The backfill never picks a note whose `enrich-miss` count is at or over this.
 pub(crate) const ENRICH_MISS_CAP: u32 = 3;
 
-/// The step's `scope`: the shared `note|backfill` grammar plus `recover`.
+/// The step's `scope`: the shared `note|backfill` grammar plus `strip-top`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
     Note,
     Backfill,
-    Recover,
+    StripTop,
 }
 
-/// The refusal of the retired `recover` flag (`what` names the step key or the job param).
+/// The refusal of the retired recovery (`what` names the step key, the job param or the scope
+/// value).
 fn obsolete_recover(what: &str) -> String {
-    format!("intake_enrich: {what} `recover` is no longer accepted; use `scope = \"recover\"`")
+    format!(
+        "intake_enrich: {what} `recover` is no longer accepted; recovery is retired (enrich writes \
+         no top block, so a stamped note without one is not a recovery target); use \
+         `scope = \"strip-top\"` to remove legacy top blocks"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -105,10 +123,11 @@ pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
     let scope = match get_str(t, "scope")?.as_deref() {
         None | Some("note") => Scope::Note,
         Some("backfill") => Scope::Backfill,
-        Some("recover") => Scope::Recover,
+        Some("strip-top") => Scope::StripTop,
+        Some("recover") => return Err(obsolete_recover("scope")),
         Some(s) => {
             return Err(format!(
-                "intake_enrich step: `scope` {s:?} is not note|backfill|recover"
+                "intake_enrich step: `scope` {s:?} is not note|backfill|strip-top"
             ));
         }
     };
@@ -146,7 +165,7 @@ impl StepModule for IntakeEnrich {
         match p.scope {
             Scope::Note => run_note(&p, ctx, agent::manager()?),
             Scope::Backfill => backfill(&p, ctx),
-            Scope::Recover => recover(ctx),
+            Scope::StripTop => strip_top(ctx),
         }
     }
 }
@@ -164,11 +183,11 @@ struct Vars {
     words: usize,
     anchors_resolved: usize,
     anchors_dropped: usize,
+    anchors_already_folded: usize,
     spans_folded: usize,
     lines_folded: usize,
     banners_folded: usize,
     fold_refused_over_half: bool,
-    top_block: bool,
     headings_inserted: usize,
 }
 
@@ -182,11 +201,11 @@ impl Vars {
             words,
             anchors_resolved: r.anchors_resolved,
             anchors_dropped: r.anchors_dropped,
+            anchors_already_folded: r.anchors_already_folded,
             spans_folded: r.spans_folded,
             lines_folded: r.lines_folded,
             banners_folded: r.banners_folded,
             fold_refused_over_half: r.fold_refused_over_half,
-            top_block: r.top_block,
             headings_inserted: r.headings_inserted,
         }
     }
@@ -214,10 +233,14 @@ pub(crate) fn miss_count(v: Option<&JsValue>) -> u32 {
     }
 }
 
-/// Whether an edit of a body of `words` words is a miss: long enough for a top block, and the
-/// edit produced neither a top block nor a fold.
+/// Whether an edit of a body of `words` words is a miss: at least [`SHORT_WORDS`] words, and the
+/// answer's anchors the pass evaluated all failed to resolve (none requested is no miss; a span
+/// an earlier run already folded counts as resolved).
 pub(crate) fn is_miss(words: usize, r: &EnrichReport) -> bool {
-    words >= SHORT_WORDS && !r.top_block && r.lines_folded == 0
+    words >= SHORT_WORDS
+        && r.anchors_dropped > 0
+        && r.anchors_resolved == 0
+        && r.anchors_already_folded == 0
 }
 
 /// The note run, with the provider manager injected (tests pass one with a test secret source).
@@ -246,6 +269,10 @@ pub(crate) fn run_note(
         });
         return Ok(out);
     }
+    // The heading restore precedes every write that drops a legacy top block (invariant (c)); the
+    // write still checks the hash of the bytes read (`orig`).
+    let orig = text;
+    let text = restore_legacy_heading(&orig).unwrap_or_else(|| orig.clone());
     let source = FrontmatterDoc::new(text.as_str());
     let body = source.body();
     let words = body.split_whitespace().count();
@@ -264,14 +291,18 @@ pub(crate) fn run_note(
         &parsed,
         &banners,
         EnrichOpts {
-            top_block: words >= SHORT_WORDS,
+            headings: words >= SHORT_WORDS,
         },
     );
     let fm_err =
         |e: cv_note::FmError| StepError::failed(format!("intake_enrich: frontmatter: {e}"));
     if is_miss(words, &edit.report) {
-        // Nothing usable came back: keep the body and the unstamped state, count the miss.
-        let mut doc = FrontmatterDoc::new(text.as_str());
+        // Nothing usable came back: keep the body (minus a legacy top block, invariant (a)) and
+        // the unstamped state, count the miss.
+        let mut doc = match enrich::strip_top(body) {
+            Some(stripped) => reattach(&text, body, &stripped),
+            None => FrontmatterDoc::new(text.as_str()),
+        };
         let n = miss_count(doc.get("enrich-miss").map_err(fm_err)?.as_ref()).saturating_add(1);
         doc.set("enrich-miss", &JsValue::Num(f64::from(n)))
             .map_err(fm_err)?;
@@ -288,7 +319,7 @@ pub(crate) fn run_note(
     let date = super::materialize::now().format("%Y-%m-%d").to_string();
     super::enrich_stamp::set(&mut doc, date, model_ref).map_err(fm_err)?;
     let new = doc.into_text();
-    if new != text {
+    if new != orig {
         ctx.write(&path, new.into_bytes(), Some(hash))?;
     }
     out.push_output(path);
@@ -342,12 +373,13 @@ struct BackfillVars {
     miss_capped: usize,
 }
 
-/// Outcome vars of a recovery run.
+/// Outcome vars of a strip-top run.
 #[derive(Serialize)]
-struct RecoverVars {
+struct StripVars {
     candidates: usize,
-    recovered: usize,
-    recover_conflict: usize,
+    stripped: usize,
+    heading_restored: usize,
+    strip_conflict: usize,
 }
 
 /// The newest-first (`ctime` desc, then path) candidates, at most `limit`: the unenriched ones plus
@@ -487,46 +519,66 @@ fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     Ok(out)
 }
 
-/// Whether a stamped note is a recovery target: a body of [`SHORT_WORDS`] words or more with
-/// neither generated block (the stamp was set over a body that was never enriched).
-pub(crate) fn needs_recovery(text: &str) -> bool {
-    let doc = FrontmatterDoc::new(text);
-    let body = doc.body();
-    already_enriched(text)
-        && body.split_whitespace().count() >= SHORT_WORDS
-        && !enrich::has_generated_block(body)
+/// The legacy top-block strip of one note's `text`: `None` when it carries none; else the new
+/// text and whether a `## Transcript` heading was restored first (YouTube clips only, while the
+/// block's ToC link still says the heading belongs).
+pub(crate) fn strip_top_text(text: &str) -> Option<(String, bool)> {
+    let restored = restore_legacy_heading(text);
+    let heading = restored.is_some();
+    let cur = restored.unwrap_or_else(|| text.to_owned());
+    let body = FrontmatterDoc::new(cur.as_str()).body().to_owned();
+    let stripped = enrich::strip_top(&body)?;
+    let new = reattach(&cur, &body, &stripped).into_text();
+    Some((new, heading))
 }
 
-/// The recover scope: clears the enrich stamp ([`super::enrich_stamp::clear`]) of every stamped
-/// candidate that [`needs_recovery`], CAS-written; nothing is enqueued.
-fn recover(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let notes = intake_notes(ctx)?;
-    let (mut recovered, mut conflict) = (0, 0);
-    for path in notes.ctimes.keys().filter(|p| notes.enriched.contains(*p)) {
+/// Invariant (c): `text` with a `## Transcript` heading re-inserted when it is a YouTube clip
+/// whose legacy top block's ToC still links the missing heading; `None` otherwise. Every path that
+/// removes a legacy top block (strip-top, the note scope's success and miss writes) applies it
+/// first, because the link is the only evidence and leaves with the block.
+pub(crate) fn restore_legacy_heading(text: &str) -> Option<String> {
+    (cv_note::is_youtube_clip(text) && enrich::has_legacy_top(FrontmatterDoc::new(text).body()))
+        .then(|| cv_note::restore_transcript_heading(text))
+        .flatten()
+}
+
+/// The strip-top scope: removes the legacy top block of every user markdown note carrying one
+/// ([`strip_top_text`]), CAS-written; no model call, nothing enqueued.
+fn strip_top(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let paths: Vec<String> = ctx
+        .index()?
+        .query()
+        .md_files_under("")?
+        .into_iter()
+        .map(|f| f.path)
+        .filter(|p| cv_text::vpath::is_user_path(p))
+        .collect();
+    let (mut stripped, mut restored, mut conflict) = (0, 0, 0);
+    for path in &paths {
         let Some((bytes, hash)) = ctx.read(path)? else {
             continue;
         };
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        if !needs_recovery(&text) {
+        let Some((new, heading)) = strip_top_text(&text) else {
             continue;
-        }
-        let mut doc = FrontmatterDoc::new(text.as_str());
-        let fm_err =
-            |e: cv_note::FmError| StepError::failed(format!("intake_enrich: frontmatter: {e}"));
-        super::enrich_stamp::clear(&mut doc).map_err(fm_err)?;
-        match ctx.try_write(path, doc.into_text().into_bytes(), Some(hash))? {
-            Ok(_) => recovered += 1,
+        };
+        match ctx.try_write(path, new.into_bytes(), Some(hash))? {
+            Ok(_) => {
+                stripped += 1;
+                restored += usize::from(heading);
+            }
             Err(cv_vault::VaultError::Conflict { .. }) => conflict += 1,
             Err(e) => return Err(e.into()),
         }
     }
     let mut out = StepOutcome::default();
-    out.set_vars(&RecoverVars {
-        candidates: notes.ctimes.len(),
-        recovered,
-        recover_conflict: conflict,
+    out.set_vars(&StripVars {
+        candidates: paths.len(),
+        stripped,
+        heading_restored: restored,
+        strip_conflict: conflict,
     });
     Ok(out)
 }

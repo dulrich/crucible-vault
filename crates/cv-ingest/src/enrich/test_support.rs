@@ -3,5 +3,5 @@
 use super::EnrichOpts;
 
 pub(crate) fn opts() -> EnrichOpts {
-    EnrichOpts { top_block: true }
+    EnrichOpts { headings: true }
 }

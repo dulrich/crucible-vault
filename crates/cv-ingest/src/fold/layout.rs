@@ -61,7 +61,7 @@ pub(crate) fn quote(l: &str) -> String {
 
 /// A fold content line back to the original line (inverse of [`quote`]; hand-written lines without
 /// the `> ` prefix are kept as they are).
-fn unquote(l: &str) -> &str {
+pub(crate) fn unquote(l: &str) -> &str {
     if l.trim_end() == ">" {
         ""
     } else {

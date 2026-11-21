@@ -384,8 +384,8 @@ pub static INTAKE_ENRICH: Record = Record {
         field(
             "scope",
             "Scope",
-            "note: enrich the run's active note; backfill: enqueue the newest unenriched intake notes; recover: un-stamp long notes whose `enriched` stamp has neither a top block nor a fold (no enqueue)",
-            Node::Enum(&["note", "backfill", "recover"]),
+            "note: enrich the run's active note; backfill: enqueue the newest unenriched intake notes; strip-top: remove the legacy `[!abstract]` top block from every note carrying one (no model call, no enqueue)",
+            Node::Enum(&["note", "backfill", "strip-top"]),
         )
         .dflt(D::Str("note")),
         field(

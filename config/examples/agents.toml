@@ -41,7 +41,7 @@ model = "codex:gpt-5.5"
 max_tokens = 16384
 
 # Intake enrich (plan intake-auto-enrich WP-3, D29): ONE call per intake note returns a JSON object
-# (summary, entities, key_claims, chapters, spans, content_ends_after) of verbatim anchors that
+# (chapters, spans, content_ends_after) of verbatim anchors that
 # the `intake_enrich` step resolves and applies; the model never rewrites the note. GPT-6.1-Terra
 # at its default (low) effort; the spike's answers were well under 4k tokens. Repoint `model`
 # at another route (e.g. the local llama.cpp provider or MiMo-V2.6-Pro) without code changes.

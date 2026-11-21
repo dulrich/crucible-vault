@@ -4,17 +4,16 @@
 //!   `first_line` matches a whole line not already claimed by an earlier span (so a repeated chrome
 //!   block resolves to its successive occurrences); `last_line` is the first whole-line match at or
 //!   after it. `starts_at` is the first line whose squeezed text starts with the anchor, else the
-//!   first line containing it. A claim `quote` must occur in the squeezed body (lines joined by one
-//!   space), else the claim is dropped. `content_ends_after` is the *last* whole-line match (else
+//!   first line containing it. `content_ends_after` is the *last* whole-line match (else
 //!   the last line starting with it); every non-blank line after it becomes one `footer` span.
 //! - **Banners** ([`BannerRef`]) are the exact embed text; every line consisting solely of that
 //!   embed (squeezed equality) folds. Line indices were rejected: they drift across edits.
 //! - **Headings**: when the body (outside code fences and outside folded lines) has markdown
-//!   headings, chapters are ignored and the ToC links the existing headings in order; otherwise
-//!   resolved chapters become `## <title>` headings and the ToC links them. The top block is only
-//!   emitted when the model gave a summary, entities, claims or chapters (never a ToC alone).
+//!   headings, chapters are ignored; otherwise resolved chapters become `## <title>` headings.
 //!   Chapters with unresolved anchors or duplicate lines are dropped; with existing headings the
-//!   chapters are neither resolved nor counted.
+//!   chapters are neither resolved nor counted. No top block is rendered (plan
+//!   abstract-removal-confidence-deletion WP-2, Decision 1: the `[!abstract]-` block, its ToC and
+//!   the claim-quote anchors are gone; a legacy one is removed by the re-run's strip).
 //! - **Inserted headings** are preceded by a `%% cv-enrich heading %%` marker line and followed by
 //!   one blank line; a re-run strips marker + heading + blank before deciding "has headings".
 
@@ -25,21 +24,21 @@ use cv_text::sections::heading_text;
 
 use super::body::link_safe;
 use super::{
-    BannerRef, EnrichOpts, EnrichOutput, EnrichReport, MARK_CLOSE, MARK_HEADING, MARK_OPEN,
-    SpanKind, squeeze,
+    BannerRef, EnrichOpts, EnrichOutput, EnrichReport, MARK_HEADING, MARK_OPEN, SpanKind, squeeze,
 };
 use crate::fold::{Anchor, FOLD_HEADER, anchor_of, closing, quote, render_meta, write_fold};
-
-const TOP_HEADER: &str = "> [!abstract]-";
 
 /// Folded line index → the kind of the span that claimed it first.
 type Kinds = std::collections::BTreeMap<usize, SpanKind>;
 
 /// Phase 1: the line indices the model's spans and `content_ends_after` fold, and each folded
-/// line's span kind (the first span claiming a line wins).
+/// line's span kind (the first span claiming a line wins). A span that does not resolve against
+/// the body but whose both anchors are lines of the prior fold (`prior`, squeezed and unquoted)
+/// is counted as `anchors_already_folded`, not dropped: an earlier run already applied it.
 pub(super) fn resolve_fold(
     output: &EnrichOutput,
     sq: &[String],
+    prior: &[String],
 ) -> (BTreeSet<usize>, Kinds, EnrichReport) {
     let mut rep = EnrichReport::default();
     let mut fold: BTreeSet<usize> = BTreeSet::new();
@@ -65,6 +64,9 @@ pub(super) fn resolve_fold(
                 for i in s..=e {
                     kinds.entry(i).or_insert_with(|| span.kind.clone());
                 }
+            }
+            None if !a.is_empty() && prior.contains(&a) && prior.contains(&b) => {
+                rep.anchors_already_folded += 1;
             }
             None => rep.anchors_dropped += 1,
         }
@@ -129,14 +131,13 @@ pub(super) fn banners_and_cap(
     (fold, rep)
 }
 
-/// Phase 3's piece: the ToC entries and the chapter headings to insert (line index, title).
+/// Phase 3's piece: the chapter headings to insert (line index, title).
 pub(super) struct HeadingPlan {
-    pub(super) toc: Vec<String>,
     pub(super) inserts: Vec<(usize, String)>,
     pub(super) report: EnrichReport,
 }
 
-/// Phase 3: link the existing headings, or resolve the model's chapters into inserted headings.
+/// Phase 3: keep the existing headings, or resolve the model's chapters into inserted headings.
 pub(super) fn plan_headings(
     output: &EnrichOutput,
     opts: EnrichOpts,
@@ -146,16 +147,11 @@ pub(super) fn plan_headings(
 ) -> HeadingPlan {
     let mut rep = EnrichReport::default();
     let fence = blocks::fenced_lines(lines);
-    let existing: Vec<&str> = (0..lines.len())
+    let has_headings = (0..lines.len())
         .filter(|&i| !fence[i] && !fold.contains(&i))
-        .filter_map(|i| heading_text(&lines[i]))
-        .collect();
+        .any(|i| heading_text(&lines[i]).is_some());
     let mut inserts: Vec<(usize, String)> = Vec::new();
-    let toc: Vec<String> = if !opts.top_block {
-        Vec::new()
-    } else if !existing.is_empty() {
-        existing.iter().map(|h| link_safe(h)).collect()
-    } else {
+    if opts.headings && !has_headings {
         for ch in &output.chapters {
             let (a, title) = (squeeze(&ch.starts_at), link_safe(&ch.title));
             let at = (!a.is_empty() && !title.is_empty())
@@ -177,94 +173,12 @@ pub(super) fn plan_headings(
             }
         }
         inserts.sort_by_key(|(i, _)| *i);
-        inserts.iter().map(|(_, t)| t.clone()).collect()
-    };
+    }
     rep.headings_inserted = inserts.len();
     HeadingPlan {
-        toc,
         inserts,
         report: rep,
     }
-}
-
-/// Phase 4: the top `> [!abstract]-` block lines (empty when there is none).
-pub(super) fn render_top(
-    output: &EnrichOutput,
-    opts: EnrichOpts,
-    sq: &[String],
-    toc: &[String],
-) -> (Vec<String>, EnrichReport) {
-    let mut rep = EnrichReport::default();
-    let mut top: Vec<String> = Vec::new();
-    if !opts.top_block {
-        return (top, rep);
-    }
-    let mut sections: Vec<Vec<String>> = Vec::new();
-    if let Some(s) = &output.summary {
-        sections.push(vec![squeeze(s)]);
-    }
-    if !output.entities.is_empty() {
-        let ents: Vec<String> = output
-            .entities
-            .iter()
-            .map(|e| {
-                if e.kind.is_empty() {
-                    e.name.clone()
-                } else {
-                    format!("{} ({})", e.name, e.kind)
-                }
-            })
-            .collect();
-        sections.push(vec![format!("Entities: {}", ents.join(", "))]);
-    }
-    let joined = sq
-        .iter()
-        .filter(|s| !s.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut claims = Vec::new();
-    for c in &output.key_claims {
-        let q = squeeze(&c.quote);
-        if q.is_empty() {
-            claims.push(format!("- {}", c.claim));
-        } else if joined.contains(&q) {
-            rep.anchors_resolved += 1;
-            claims.push(format!("- {} — \"{q}\"", c.claim));
-        } else {
-            rep.anchors_dropped += 1;
-        }
-    }
-    if !claims.is_empty() {
-        claims.insert(0, "Key claims:".to_owned());
-        sections.push(claims);
-    }
-    if !toc.is_empty() {
-        let mut s = vec!["Contents:".to_owned()];
-        s.extend(toc.iter().map(|t| format!("- [[#{t}]]")));
-        sections.push(s);
-    }
-    // A ToC of existing headings alone is not worth a block: require model content.
-    let model_content = output.summary.is_some()
-        || !output.entities.is_empty()
-        || !output.key_claims.is_empty()
-        || !output.chapters.is_empty();
-    if model_content && !sections.is_empty() {
-        rep.top_block = true;
-        top.push(MARK_OPEN.to_owned());
-        top.push(TOP_HEADER.to_owned());
-        for (k, sec) in sections.iter().enumerate() {
-            if k > 0 {
-                top.push(">".to_owned());
-            }
-            top.extend(sec.iter().map(|l| format!("> {l}")));
-        }
-        // A blank line ends the callout: a close marker right after a `> ` line is a lazy
-        // continuation of the callout paragraph and renders as text inside it.
-        top.push(String::new());
-        top.push(MARK_CLOSE.to_owned());
-    }
-    (top, rep)
 }
 
 /// Phase 5's piece: one new fold group — its line indices, kind and position anchor.
@@ -349,16 +263,14 @@ pub(super) fn render_fold(
     (write_fold(head, FOLD_HEADER, chunks, closing()), rep)
 }
 
-/// Phase 6: the body without folded lines, with the inserted headings, the top block first and
-/// the fold block last.
+/// Phase 6: the body without folded lines, with the inserted headings and the fold block last.
 pub(super) fn assemble(
     lines: &[String],
     fold: &BTreeSet<usize>,
     inserts: &[(usize, String)],
-    top: Vec<String>,
     fold_block: Vec<String>,
 ) -> String {
-    let mut out: Vec<String> = Vec::with_capacity(lines.len() + top.len() + fold_block.len());
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + fold_block.len());
     let mut ins = inserts.iter().peekable();
     let mut i = 0;
     while i < lines.len() {
@@ -382,14 +294,6 @@ pub(super) fn assemble(
         }
         out.push(lines[i].clone());
         i += 1;
-    }
-    if !top.is_empty() {
-        let lead = out.iter().take_while(|l| l.trim().is_empty()).count();
-        out.drain(..lead);
-        let mut t = top;
-        t.push(String::new());
-        t.append(&mut out);
-        out = t;
     }
     if !fold_block.is_empty() {
         while out.last().is_some_and(|l| l.trim().is_empty()) {

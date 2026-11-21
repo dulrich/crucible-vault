@@ -1,8 +1,9 @@
 //! The body model: the generated blocks stripped from a note body, and the structure strip.
 //! Decisions recorded here:
 //! - **Generated blocks** are wrapped in `%% cv-enrich %%` … `%% /cv-enrich %%`; the block whose
-//!   callout header is `> [!removed]-` is the fold, the other the top block. A re-run strips both
-//!   and carries the old fold's content into the new fold (plan E2: content already folded stays).
+//!   callout header is `> [!removed]-` is the fold, any other a legacy top block (no longer
+//!   written). A re-run strips both and carries the old fold's content into the new fold (plan E2:
+//!   content already folded stays); [`strip_top`] removes only the legacy `[!abstract]` block.
 
 use cv_text::blocks;
 
@@ -81,12 +82,65 @@ pub(super) fn link_safe(title: &str) -> String {
     squeeze(&title.replace(['[', ']', '|', '#', '^'], ""))
 }
 
-/// Whether a frontmatter-free note body carries a generated block: a well-formed managed
-/// top block (`> [!abstract]-`) or `> [!removed]-` fold. Built on the one block parser
-/// (`strip_generated`); an unterminated marker is ordinary text.
+/// The legacy top-block header the pass wrote before plan abstract-removal-confidence-deletion
+/// WP-2 (matched for removal only; never written).
+const LEGACY_TOP_HEADER: &str = "> [!abstract]";
+
+/// The `(open, close)` line indices of every legacy top block in `raw`: a well-formed
+/// `%% cv-enrich %%` … `%% /cv-enrich %%` managed block ([`blocks::generated`]) whose open marker is
+/// outside a code fence, whose first non-blank inner line starts with `> [!abstract]` and which
+/// holds no `> [!removed]-` fold header (audit pin E1: a fenced literal, or a user-authored
+/// `[!abstract]` callout outside a managed block, is never matched).
+fn legacy_tops(raw: &[&str]) -> Vec<(usize, usize)> {
+    let fenced = blocks::fenced_lines(raw);
+    blocks::generated(raw)
+        .blocks
+        .into_iter()
+        .filter(|&(i, j)| {
+            let inner = &raw[i + 1..j];
+            !fenced[i]
+                && inner
+                    .iter()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.trim_start().starts_with(LEGACY_TOP_HEADER))
+                && !inner.iter().any(|l| l.trim_end() == FOLD_HEADER)
+        })
+        .collect()
+}
+
+/// Whether a frontmatter-free note body carries a legacy top block (see [`strip_top`]).
 #[must_use]
-pub fn has_generated_block(body: &str) -> bool {
-    strip_generated(body).had_generated
+pub fn has_legacy_top(body: &str) -> bool {
+    let raw: Vec<&str> = body.split('\n').collect();
+    !legacy_tops(&raw).is_empty()
+}
+
+/// A frontmatter-free body without its legacy top block(s): each matched block (see
+/// [`has_legacy_top`] for the rule) and one blank line after it are removed; every other line —
+/// inserted headings, `> [!removed]-` folds and their metadata — is kept byte-identical. `None`
+/// when the body has no legacy top block (so a second pass is `None`).
+#[must_use]
+pub fn strip_top(body: &str) -> Option<String> {
+    let raw: Vec<&str> = body.split('\n').collect();
+    let tops = legacy_tops(&raw);
+    if tops.is_empty() {
+        return None;
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    let mut next = tops.iter().peekable();
+    while i < raw.len() {
+        if let Some(&(_, j)) = next.next_if(|(o, _)| *o == i) {
+            i = j + 1;
+            if i < raw.len() && raw[i].trim().is_empty() {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    Some(out.join("\n"))
 }
 
 /// A frontmatter-free body without the enrich pass's structure: every well-formed managed top

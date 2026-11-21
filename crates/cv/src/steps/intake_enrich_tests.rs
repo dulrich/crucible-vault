@@ -126,7 +126,7 @@ async fn success_writes_once_with_enriched_and_a_folded_cta() {
     let t = read(&e, "n.md");
     assert!(t.contains("\nenriched: 20"), "{t}");
     assert!(t.contains("\nenrich-model: fake:m1\n"), "{t}");
-    assert!(t.contains("> [!abstract]-"), "{t}");
+    assert!(!t.contains("[!abstract]"), "{t}");
     assert!(t.contains("> [!removed]-"), "{t}");
     // Nothing deleted: the CTA text lives on inside the fold.
     assert_eq!(t.matches(CTA).count(), 1, "{t}");
@@ -136,7 +136,7 @@ async fn success_writes_once_with_enriched_and_a_folded_cta() {
     assert_eq!(var(&o, "anchors_resolved"), json!(1));
     assert_eq!(var(&o, "anchors_dropped"), json!(0));
     assert_eq!(var(&o, "lines_folded"), json!(1));
-    assert_eq!(var(&o, "top_block"), json!(true));
+    assert_eq!(var(&o, "top_block"), Value::Null);
     assert_eq!(o.output_paths, vec!["n.md".to_owned()]);
 }
 
@@ -159,10 +159,10 @@ async fn second_run_skips_without_a_model_call_and_force_reruns() {
     let job = Map::from_iter([("force".to_owned(), json!(true))]);
     exec(&e, "n.md", job, params(false)).await.unwrap();
     assert_eq!(mock.requests().len(), 3);
-    // One fold and one top block, never a second copy.
+    // One fold, never a second copy, and no top block.
     let t = read(&e, "n.md");
     assert_eq!(t.matches("[!removed]-").count(), 1, "{t}");
-    assert_eq!(t.matches("[!abstract]-").count(), 1, "{t}");
+    assert_eq!(t.matches("[!abstract]-").count(), 0, "{t}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -211,7 +211,7 @@ async fn unparseable_or_truncated_answers_write_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn short_body_is_folded_but_gets_no_top_block() {
+async fn short_body_is_folded_and_stamped() {
     let (base, _mock) = fake(200, &answer(), "stop", None);
     let e = env(&base, "CV_TEST_KEY");
     e.fx.write("s.md", short_note());
@@ -220,7 +220,6 @@ async fn short_body_is_folded_but_gets_no_top_block() {
     assert!(t.contains("> [!removed]-"), "{t}");
     assert!(!t.contains("[!abstract]"), "{t}");
     assert!(t.contains("\nenriched: 20"), "{t}");
-    assert_eq!(var(&o, "top_block"), json!(false));
     assert_eq!(var(&o, "lines_folded"), json!(1));
 }
 
@@ -270,10 +269,13 @@ fn frontmatter_untouched_byte_for_byte() {
     use cv_note::FrontmatterDoc;
     let fm = "---\r\nweird:   spacing  \r\nlist:\n  - a\n---\n";
     let out = EnrichOutput {
-        summary: Some("A summary.".into()),
+        chapters: vec![cv_ingest::enrich::Chapter {
+            title: "Part".into(),
+            starts_at: "More text".into(),
+        }],
         ..EnrichOutput::default()
     };
-    let opts = EnrichOpts { top_block: true };
+    let opts = EnrichOpts { headings: true };
     let n = format!("{fm}Some body text.\n\nMore text.\n");
     let run = |text: &str| {
         let doc = FrontmatterDoc::new(text);
@@ -283,7 +285,7 @@ fn frontmatter_untouched_byte_for_byte() {
     };
     let once = run(&n);
     assert!(once.starts_with(fm), "{once}");
-    assert!(once.contains("[!abstract]"), "{once}");
+    assert!(once.contains("## Part"), "{once}");
     let again = run(&once);
     assert!(again.starts_with(fm), "{again}");
 }
@@ -475,18 +477,27 @@ async fn a_recurring_banner_folds_without_any_model_span() {
 }
 
 fn empty_answer() -> String {
+    json!({"chapters": [], "spans": [], "content_ends_after": null}).to_string()
+}
+
+/// An answer whose every anchor fails to resolve (span, `content_ends_after`, chapter).
+fn unresolved_answer() -> String {
     json!({
-        "summary": null, "entities": [], "key_claims": [], "chapters": [],
-        "spans": [], "content_ends_after": null
+        "chapters": [{"title": "Ghost", "starts_at": "no such line anywhere"}],
+        "spans": [{"kind": "cta", "first_line": "not in the note", "last_line": "nor this"}],
+        "content_ends_after": "missing ending"
     })
     .to_string()
 }
 
-/// WP-7: a long note with an empty answer is a miss (no stamp, body unchanged, counted); a second
-/// miss makes 2.
+/// A legacy `[!abstract]` top block as the pre-WP-2 pass wrote it (ToC linking `#Transcript`).
+const LEGACY_TOP: &str = "%% cv-enrich %%\n> [!abstract]-\n> A summary.\n>\n> Contents:\n> - [[#Transcript]]\n\n%% /cv-enrich %%\n\n";
+
+/// Plan abstract-removal-confidence-deletion WP-2 (b): a long note whose answer's anchors all fail
+/// is a miss (no stamp, body unchanged, counted); a second miss makes 2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_long_note_miss_counts_without_stamping_and_accumulates() {
-    let (base, _mock) = fake(200, &empty_answer(), "stop", None);
+    let (base, _mock) = fake(200, &unresolved_answer(), "stop", None);
     let e = env(&base, "CV_TEST_KEY");
     let orig = long_note();
     e.fx.write("n.md", orig.clone());
@@ -504,6 +515,65 @@ async fn a_long_note_miss_counts_without_stamping_and_accumulates() {
     let o = exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
     assert!(read(&e, "n.md").contains("\nenrich-miss: 2\n"));
     assert_eq!(var(&o, "enrich_miss"), json!(2));
+}
+
+/// WP-2 (a): the miss write removes a legacy top block, and so does a stamping write; nothing
+/// else in the body changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_enrich_write_removes_a_legacy_top_block() {
+    let orig = long_note();
+    let legacy = orig.replacen("---\n\n", &format!("---\n{LEGACY_TOP}"), 1);
+    assert_ne!(legacy, orig);
+    let (base, _mock) = fake(200, &unresolved_answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("n.md", legacy.clone());
+    let o = exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+    assert_eq!(var(&o, "miss"), json!(true));
+    let t = read(&e, "n.md");
+    assert_eq!(
+        t,
+        orig.replacen("---\n\n", "enrich-miss: 1\n---\n", 1),
+        "{t}"
+    );
+    let (base, _mock) = fake(200, &answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("n.md", legacy);
+    exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+    let t = read(&e, "n.md");
+    assert!(
+        t.contains("\nenriched: 20") && !t.contains("[!abstract]"),
+        "{t}"
+    );
+    assert!(t.contains("> [!removed]-"), "{t}");
+}
+
+/// WP-2 (b): a long note whose answer requested no anchors is stamped, not a miss, and a reply
+/// still carrying the retired `summary` / `entities` / `key_claims` keys is accepted with them
+/// ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_no_anchor_answer_stamps_and_retired_keys_are_ignored() {
+    let retired = json!({
+        "summary": "A test post.", "entities": [{"name": "Acme"}],
+        "key_claims": [{"claim": "c", "quote": "q"}], "chapters": [], "spans": []
+    })
+    .to_string();
+    for reply in [empty_answer(), retired] {
+        let (base, _mock) = fake(200, &reply, "stop", None);
+        let e = env(&base, "CV_TEST_KEY");
+        e.fx.write("n.md", long_note());
+        let o = exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+        let t = read(&e, "n.md");
+        assert!(
+            t.contains("\nenriched: 20") && !t.contains("enrich-miss"),
+            "{t}"
+        );
+        assert!(
+            !t.contains("[!abstract]") && !t.contains("A test post."),
+            "{t}"
+        );
+        assert_eq!(var(&o, "enriched"), json!(true));
+        assert_eq!(var(&o, "miss"), Value::Null);
+    }
 }
 
 /// WP-7: a later successful enrich stamps and removes `enrich-miss`; a malformed value reads as 0.
@@ -524,7 +594,7 @@ async fn a_successful_enrich_removes_enrich_miss() {
     assert_eq!(var(&o, "enriched"), json!(true));
     assert_eq!(var(&o, "miss"), Value::Null);
     // Malformed count: reads as 0, overwritten by the next miss.
-    let (base, _mock) = fake(200, &empty_answer(), "stop", None);
+    let (base, _mock) = fake(200, &unresolved_answer(), "stop", None);
     let e = env(&base, "CV_TEST_KEY");
     e.fx.write(
         "m.md",
@@ -534,10 +604,10 @@ async fn a_successful_enrich_removes_enrich_miss() {
     assert!(read(&e, "m.md").contains("\nenrich-miss: 1\n"));
 }
 
-/// WP-7: a short note with an empty answer is never a miss; it is stamped as before.
+/// WP-7 / WP-2 (b): a short note is never a miss, even when every anchor failed; it is stamped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_short_note_with_an_empty_answer_is_stamped() {
-    let (base, _mock) = fake(200, &empty_answer(), "stop", None);
+async fn a_short_note_with_unresolved_anchors_is_stamped() {
+    let (base, _mock) = fake(200, &unresolved_answer(), "stop", None);
     let e = env(&base, "CV_TEST_KEY");
     e.fx.write("s.md", short_note());
     let o = exec(&e, "s.md", Map::new(), params(false)).await.unwrap();
@@ -578,24 +648,36 @@ fn backfill_step(extra: &str) -> cv_actions::Step {
     cv_actions::Step::from_table(s).unwrap()
 }
 
-fn recover_step() -> cv_actions::Step {
-    let mut s: toml::Table = "scope = \"recover\"".parse().unwrap();
+fn strip_step() -> cv_actions::Step {
+    let mut s: toml::Table = "scope = \"strip-top\"".parse().unwrap();
     s.insert("type".into(), "intake_enrich".into());
     cv_actions::Step::from_table(s).unwrap()
 }
 
+/// The retired-recovery refusal text (`what` = step key, job param or scope).
+fn recover_refusal(what: &str) -> String {
+    format!(
+        "intake_enrich: {what} `recover` is no longer accepted; recovery is retired (enrich writes \
+         no top block, so a stamped note without one is not a recovery target); use \
+         `scope = \"strip-top\"` to remove legacy top blocks"
+    )
+}
+
+/// WP-2 (e): the `recover` step key and `scope = "recover"` are refused, never mapped; an unknown
+/// scope names the accepted values.
 #[test]
-fn a_recover_step_key_is_refused_with_the_scope_spelling() {
+fn recover_key_and_scope_are_refused() {
     let err = parse(&"scope = \"backfill\"\nrecover = true".parse().unwrap()).unwrap_err();
-    assert_eq!(
-        err,
-        "intake_enrich: step key `recover` is no longer accepted; use `scope = \"recover\"`"
-    );
-    assert!(parse(&"scope = \"recover\"".parse().unwrap()).is_ok());
+    assert_eq!(err, recover_refusal("step key"));
+    let err = parse(&"scope = \"recover\"".parse().unwrap()).unwrap_err();
+    assert_eq!(err, recover_refusal("scope"));
+    let err = parse(&"scope = \"nope\"".parse().unwrap()).unwrap_err();
+    assert!(err.contains("note|backfill|strip-top"), "{err}");
+    assert!(parse(&"scope = \"strip-top\"".parse().unwrap()).is_ok());
 }
 
 #[test]
-fn a_recover_job_param_is_refused_with_the_scope_spelling() {
+fn a_recover_job_param_is_refused() {
     let fx = LiveFixture::new([("Posts/n.md", "---\npost-id: \"1\"\n---\nbody\n")]);
     let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
     let rec = AtRecorder::default();
@@ -604,12 +686,7 @@ fn a_recover_job_param_is_refused_with_the_scope_spelling() {
     ctx.children = &rec;
     ctx.params = &job;
     let err = super::execute(&backfill_step(""), &mut ctx).unwrap_err();
-    assert_eq!(
-        err,
-        StepError::failed(
-            "intake_enrich: job param `recover` is no longer accepted; use `scope = \"recover\"`"
-        )
-    );
+    assert_eq!(err, StepError::failed(recover_refusal("job param")));
     assert!(rec.calls().is_empty());
 }
 
@@ -634,73 +711,122 @@ fn backfill_skips_a_note_at_the_cap_and_reports_it() {
     assert_eq!(var(&o, "miss_capped"), json!(1));
 }
 
+/// WP-2 (d): `strip-top` removes only managed legacy blocks — the stamp, inserted headings and the
+/// fold (with its metadata) stay byte-identical; a fenced literal marker, a user-authored
+/// `[!abstract]` callout and a note without a block are never rewritten; a second run writes
+/// nothing; no model call, nothing enqueued.
 #[test]
-fn recover_unstamps_only_long_notes_with_neither_block_and_is_idempotent() {
-    use cv_ingest::enrich::{EnrichOpts, enrich, parse as parse_answer};
-    let para = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ";
-    let body = format!(
-        "\n{}\n\n{CTA}\n\n{}\n",
-        para.repeat(15).trim(),
-        para.repeat(5).trim()
-    );
-    let parsed = parse_answer(&answer()).unwrap();
-    let with = |top| enrich(&body, &parsed, &[], EnrichOpts { top_block: top }).text;
-    let stamp = "enriched: 2026-10-01\nenrich-model: fake:m1\nenrich-miss: 1\n";
-    let note = |id: u32, b: &str| format!("---\npost-id: \"{id}\"\nmine: x\n{stamp}---\n{b}");
-    let (long_none, long_top, long_fold) =
-        (note(1, &body), note(2, &with(true)), note(3, &with(false)));
-    assert!(long_top.contains("[!abstract]-") && long_fold.contains("[!removed]-"));
-    let short = note(4, "short body\n");
+fn strip_top_removes_only_legacy_blocks_and_is_idempotent() {
+    let stamp = "---\npost-id: \"1\"\nenriched: 2026-10-01\nenrich-model: fake:m1\n---\n";
+    let rest = "%% cv-enrich heading %%\n## Intro\n\nBody text.\n\n%% cv-enrich %%\n%% cv-fold n=1 kind=cta %%\n> [!removed]-\n> Buy now.\n\n%% /cv-enrich %%\n";
+    let legacy = format!("{stamp}{LEGACY_TOP}{rest}");
+    let fenced = format!("---\ntitle: F\n---\nIntro.\n\n```\n{LEGACY_TOP}```\n");
+    let user = "---\ntitle: U\n---\n> [!abstract]- Mine\n> my summary\n\nText.\n";
+    let plain = format!("{stamp}{rest}");
     let fx = LiveFixture::new([
-        ("Posts/none.md", long_none.as_str()),
-        ("Posts/top.md", long_top.as_str()),
-        ("Posts/fold.md", long_fold.as_str()),
-        ("Posts/short.md", short.as_str()),
+        ("Posts/legacy.md", legacy.as_str()),
+        ("Notes/fenced.md", fenced.as_str()),
+        ("Notes/user.md", user),
+        ("Posts/plain.md", plain.as_str()),
     ]);
     let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
     let rec = AtRecorder::default();
     let run = || {
         let mut ctx = e.ctx();
         ctx.children = &rec;
-        super::execute(&recover_step(), &mut ctx).unwrap()
+        super::execute(&strip_step(), &mut ctx).unwrap()
     };
     let o = run();
-    assert_eq!(var(&o, "recovered"), json!(1));
-    assert_eq!(var(&o, "recover_conflict"), json!(0));
+    assert_eq!(var(&o, "stripped"), json!(1));
+    assert_eq!(var(&o, "strip_conflict"), json!(0));
+    assert_eq!(var(&o, "heading_restored"), json!(0));
     assert_eq!(var(&o, "candidates"), json!(4));
-    let t = read(&e, "Posts/none.md");
-    assert!(
-        !t.contains("enriched:") && !t.contains("enrich-model"),
-        "{t}"
-    );
-    assert!(t.contains("mine: x\n") && !t.contains("enrich-miss"), "{t}");
-    assert_eq!(read(&e, "Posts/top.md"), long_top);
-    assert_eq!(read(&e, "Posts/fold.md"), long_fold);
-    assert_eq!(read(&e, "Posts/short.md"), short);
+    assert_eq!(read(&e, "Posts/legacy.md"), plain);
+    assert_eq!(read(&e, "Notes/fenced.md"), fenced);
+    assert_eq!(read(&e, "Notes/user.md"), user);
+    assert_eq!(read(&e, "Posts/plain.md"), plain);
     assert!(rec.calls().is_empty());
-    // The index catches up asynchronously in the fixture; the second run reads files, and the
-    // un-stamped note is no longer stamped on disk, so nothing else changes.
     let o = run();
-    assert_eq!(var(&o, "recovered"), json!(0));
+    assert_eq!(var(&o, "stripped"), json!(0));
+    assert_eq!(read(&e, "Posts/legacy.md"), plain);
 }
 
-/// Recovery clears the whole enrich stamp, the miss count included.
+/// WP-2 (c)+(d): on a YouTube clip, strip-top then the lint cleanup then refine eligibility keep
+/// the `## Transcript` section — with the heading present beforehand, and with it missing
+/// beforehand (restored from the legacy ToC link before the block goes).
 #[test]
-fn recover_clears_the_enrich_miss_count() {
-    let body = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(20);
-    let note = format!(
-        "---\npost-id: \"1\"\nenriched: 2026-10-01\nenrich-model: fake:m1\nenrich-miss: 2\n---\n{body}\n"
-    );
-    let fx = LiveFixture::new([("Posts/n.md", note.as_str())]);
+fn strip_top_then_lint_then_refine_keeps_a_clip_transcript() {
+    use cv_ingest::transcript::{Eligibility, eligibility};
+    let fm =
+        "---\nsource: https://www.youtube.com/watch?v=abcdefghijk\nenriched: 2026-10-01\n---\n";
+    let long = "word ".repeat(cv_ingest::transcript::MIN_REFINE_WORDS);
+    let present =
+        format!("{fm}{LEGACY_TOP}## Transcript\n\n**0:01** {long}\n\n**0:05** b\n\n**0:09** c\n");
+    let missing = format!("{fm}{LEGACY_TOP}{}\n", long.trim_end());
+    let fx = LiveFixture::new([
+        ("Clips/present.md", present.as_str()),
+        ("Clips/missing.md", missing.as_str()),
+    ]);
     let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
-    let rec = AtRecorder::default();
     let mut ctx = e.ctx();
+    let rec = AtRecorder::default();
     ctx.children = &rec;
-    let o = super::execute(&recover_step(), &mut ctx).unwrap();
-    assert_eq!(var(&o, "recovered"), json!(1));
-    let t = read(&e, "Posts/n.md");
+    let o = super::execute(&strip_step(), &mut ctx).unwrap();
+    assert_eq!(var(&o, "stripped"), json!(2));
+    assert_eq!(var(&o, "heading_restored"), json!(1));
+    for p in ["Clips/present.md", "Clips/missing.md"] {
+        let stripped = read(&e, p);
+        assert!(!stripped.contains("[!abstract]"), "{stripped}");
+        assert!(stripped.starts_with(fm), "{stripped}");
+        let linted = cv_note::cleanup_youtube_transcript(&stripped);
+        assert!(linted.contains("## Transcript\n\n"), "{p}: {linted}");
+        assert!(
+            matches!(
+                eligibility(cv_note::FrontmatterDoc::new(linted.as_str()).body()),
+                Eligibility::Ready { .. }
+            ),
+            "{p}: {linted}"
+        );
+    }
+}
+
+/// A legacy YouTube clip whose `## Transcript` heading a pre-WP-2 cleanup dropped (the block's ToC
+/// still links it).
+fn legacy_clip_without_heading() -> String {
+    let para = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ";
+    format!(
+        "---\ntitle: V\nsource: https://www.youtube.com/watch?v=abcdefghijk\n---\n{LEGACY_TOP}{}\n\n{CTA}\n",
+        para.repeat(15).trim()
+    )
+}
+
+/// WP-2 (c): the success write of a legacy clip restores the heading before dropping the block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn success_write_restores_a_legacy_clip_heading() {
+    let (base, _mock) = fake(200, &answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("v.md", legacy_clip_without_heading());
+    let o = exec(&e, "v.md", Map::new(), params(false)).await.unwrap();
+    assert_eq!(var(&o, "enriched"), json!(true));
+    let t = read(&e, "v.md");
     assert!(
-        !t.contains("enriched:") && !t.contains("enrich-model") && !t.contains("enrich-miss"),
+        t.contains("## Transcript\n") && !t.contains("[!abstract]"),
         "{t}"
     );
+}
+
+/// WP-2 (c): the miss write of a legacy clip restores the heading before dropping the block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn miss_write_restores_a_legacy_clip_heading() {
+    let (base, _mock) = fake(200, &unresolved_answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("v.md", legacy_clip_without_heading());
+    let o = exec(&e, "v.md", Map::new(), params(false)).await.unwrap();
+    assert_eq!(var(&o, "miss"), json!(true));
+    let t = read(&e, "v.md");
+    assert!(
+        t.contains("## Transcript\n") && !t.contains("[!abstract]"),
+        "{t}"
+    );
+    assert!(t.contains("\nenrich-miss: 1\n"), "{t}");
 }

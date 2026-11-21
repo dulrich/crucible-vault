@@ -57,31 +57,31 @@ fn note() -> String {
     BODY.to_owned()
 }
 
+/// Plan abstract-removal-confidence-deletion WP-2: `full()` still carries the retired `summary`,
+/// `entities` and `key_claims` keys; they are accepted, ignored and never counted as malformed.
 #[test]
-fn parse_strips_fence_and_prose_and_ignores_unknown_keys() {
+fn parse_strips_fence_and_prose_and_ignores_retired_and_unknown_keys() {
     let o = full();
-    assert_eq!(
-        o.summary.as_deref(),
-        Some("A letter on shrinking widgets and regional hubs.")
-    );
-    assert_eq!(o.entities[0].kind, "org");
     assert_eq!(o.spans[0].kind, SpanKind::Sponsor);
+    assert_eq!(o.chapters.len(), 1);
     assert_eq!(o.malformed, 0);
+    let wrong = parse(r#"{"summary": 7, "entities": "x", "key_claims": 3}"#).unwrap();
+    assert_eq!(wrong.malformed, 0);
+    assert_eq!(wrong, EnrichOutput::default());
 }
 
 #[test]
 fn parse_drops_wrong_typed_items_and_counts_them() {
     let o = parse(
-        r#"{"summary": 7, "entities": [{"name": "A"}, 3, {"type": "x"}],
+        r#"{"content_ends_after": 7,
             "spans": [{"kind": "weird", "first_line": "a", "last_line": "b"}, {"kind": "cta"}],
             "chapters": "nope"}"#,
     )
     .unwrap();
-    assert_eq!(o.summary, None);
-    assert_eq!(o.entities.len(), 1);
+    assert_eq!(o.content_ends_after, None);
     assert_eq!(o.spans.len(), 1);
     assert_eq!(o.spans[0].kind, SpanKind::Other("weird".into()));
-    assert_eq!(o.malformed, 1 + 2 + 1 + 1);
+    assert_eq!(o.malformed, 1 + 1 + 1);
 }
 
 #[test]
@@ -126,15 +126,18 @@ fn squeeze_collapses_whitespace() {
 }
 
 #[test]
-fn full_enrich_renders_top_block_and_fold() {
+fn full_enrich_renders_headings_and_fold_but_no_top_block() {
     let e = enrich(&note(), &full(), &[], opts());
     let t = &e.text;
-    assert!(t.starts_with("%% cv-enrich %%\n> [!abstract]-\n> A letter"));
-    assert!(t.contains("> Entities: Acme Gizmos (org)"));
-    assert!(t.contains("> - Widgets shrank. — \"the median widget shrank by a third\""));
+    // Plan abstract-removal-confidence-deletion WP-2: no `[!abstract]` block, no ToC, no claims.
+    assert!(!t.contains("[!abstract]"), "{t}");
+    assert!(!t.contains("[[#"), "{t}");
+    assert!(!t.contains("Widgets shrank."), "{t}");
     // Body has a heading (## Sponsor) but it is folded, so chapters apply.
-    assert!(t.contains("%% cv-enrich heading %%\n## Intro\n\nWelcome"));
-    assert!(t.contains("> - [[#Intro]]"));
+    assert!(
+        t.starts_with("%% cv-enrich heading %%\n## Intro\n\nWelcome"),
+        "{t}"
+    );
     assert!(t.contains("> [!removed]-\n> ## Sponsor\n> This issue"));
     assert!(
         t.contains(">\n> Subscribe now to get every issue in your inbox.\n> Share this letter")
@@ -145,8 +148,7 @@ fn full_enrich_renders_top_block_and_fold() {
     assert_eq!(e.report.lines_folded, 3 + 2);
     assert_eq!(e.report.headings_inserted, 1);
     assert_eq!(e.report.anchors_dropped, 0);
-    assert_eq!(e.report.anchors_resolved, 4);
-    assert!(e.report.top_block);
+    assert_eq!(e.report.anchors_resolved, 3);
 }
 
 #[test]
@@ -154,7 +156,7 @@ fn idempotent_rerun_replaces_blocks() {
     let once = enrich(&note(), &full(), &[], opts()).text;
     let twice = enrich(&once, &full(), &[], opts()).text;
     assert_eq!(once, twice);
-    assert_eq!(twice.matches("[!abstract]-").count(), 1);
+    assert_eq!(twice.matches("[!abstract]-").count(), 0);
     assert_eq!(twice.matches("[!removed]-").count(), 1);
     assert_eq!(twice.matches("## Intro").count(), 1);
 }
@@ -205,7 +207,7 @@ fn inserted_headings_recognised_on_rerun() {
 }
 
 #[test]
-fn existing_headings_drive_toc_and_chapters_are_ignored() {
+fn existing_headings_mean_chapters_are_ignored() {
     let body = "# Title\n\nIntro text here.\n\n## Part [one]\n\nMore text.\n";
     let mut o = EnrichOutput::default();
     o.chapters = vec![Chapter {
@@ -213,9 +215,9 @@ fn existing_headings_drive_toc_and_chapters_are_ignored() {
         starts_at: "More text".into(),
     }];
     let e = enrich(body, &o, &[], opts());
-    assert!(e.text.contains("> - [[#Title]]\n> - [[#Part one]]"));
+    assert_eq!(e.text, body);
     assert_eq!(e.report.headings_inserted, 0);
-    assert!(!e.text.contains("## X"));
+    assert_eq!(e.report.anchors_resolved + e.report.anchors_dropped, 0);
 }
 
 #[test]
@@ -243,15 +245,10 @@ fn unresolved_anchors_dropped_and_counted() {
         title: "Ghost".into(),
         starts_at: "Nowhere to be found".into(),
     });
-    o.key_claims.push(Claim {
-        claim: "Fake.".into(),
-        quote: "never said this".into(),
-    });
     o.content_ends_after = Some("Missing ending".into());
     let e = enrich(&note(), &o, &[], opts());
-    assert_eq!(e.report.anchors_dropped, 4);
+    assert_eq!(e.report.anchors_dropped, 3);
     assert!(!e.text.contains("Ghost"));
-    assert!(!e.text.contains("Fake."));
     assert!(
         e.text
             .contains("Subscribe now to get every issue in your inbox.\nShare")
@@ -312,7 +309,7 @@ fn repeated_chrome_resolves_to_successive_occurrences() {
 }
 
 #[test]
-fn half_body_cap_refuses_fold_but_keeps_top_block() {
+fn half_body_cap_refuses_fold_but_keeps_headings() {
     let mut o = full();
     o.spans = vec![Span {
         kind: SpanKind::Chrome,
@@ -324,7 +321,9 @@ fn half_body_cap_refuses_fold_but_keeps_top_block() {
     assert!(e.report.fold_refused_over_half);
     assert_eq!(e.report.lines_folded, 0);
     assert!(!e.text.contains("[!removed]"));
-    assert!(e.text.contains("[!abstract]"));
+    assert!(!e.text.contains("[!abstract]"));
+    // The unfolded `## Sponsor` is an existing heading, so no chapter is inserted.
+    assert!(!e.text.contains("## Intro"));
     assert!(e.text.contains("Subscribe now"));
 }
 
@@ -342,14 +341,15 @@ fn span_matching_generated_block_text_is_ignored() {
     let mut o = full();
     o.spans = vec![Span {
         kind: SpanKind::Chrome,
-        first_line: "> [!abstract]-".into(),
+        first_line: "> [!removed]-".into(),
         last_line: "%% /cv-enrich %%".into(),
         confidence: 1.0,
     }];
+    o.content_ends_after = None;
     let e = enrich(&once, &o, &[], opts());
     assert_eq!(e.report.lines_folded, 0);
     assert!(e.report.anchors_dropped >= 1);
-    assert_eq!(e.text.matches("[!abstract]-").count(), 1);
+    assert_eq!(e.text.matches("[!removed]-").count(), 1);
 }
 
 #[test]
@@ -371,12 +371,12 @@ fn banners_fold_into_same_callout() {
 }
 
 #[test]
-fn fold_only_mode_skips_top_block_and_headings() {
-    let e = enrich(&note(), &full(), &[], EnrichOpts { top_block: false });
+fn fold_only_mode_skips_headings() {
+    let e = enrich(&note(), &full(), &[], EnrichOpts { headings: false });
     assert!(!e.text.contains("[!abstract]"));
     assert!(!e.text.contains("## Intro"));
     assert!(e.text.contains("[!removed]-"));
-    assert!(!e.report.top_block);
+    assert_eq!(e.report.headings_inserted, 0);
 }
 
 /// Every non-blank original line survives in the body or as `> line` in the fold.
@@ -410,10 +410,10 @@ fn heading_marker_without_heading_keeps_paragraph() {
 fn no_line_lost_over_fixtures() {
     let n = note();
     for o in [full(), EnrichOutput::default()] {
-        for top in [true, false] {
-            let once = enrich(&n, &o, &[], EnrichOpts { top_block: top }).text;
+        for headings in [true, false] {
+            let once = enrich(&n, &o, &[], EnrichOpts { headings }).text;
             assert_no_loss(&n, &once);
-            let twice = enrich(&once, &o, &[], EnrichOpts { top_block: top }).text;
+            let twice = enrich(&once, &o, &[], EnrichOpts { headings }).text;
             assert_no_loss(&n, &twice);
         }
     }
@@ -421,13 +421,42 @@ fn no_line_lost_over_fixtures() {
     assert_no_loss(NO_HEADINGS, &e.text);
 }
 
+/// A legacy `[!abstract]` top block (as the pre-WP-2 pass wrote it) above an enriched body.
+const LEGACY_TOP: &str = "%% cv-enrich %%\n> [!abstract]-\n> A summary.\n>\n> Contents:\n> - [[#Intro]]\n\n%% /cv-enrich %%\n\n";
+
+/// Plan abstract-removal-confidence-deletion WP-2 (a): a re-run on a note carrying a legacy top
+/// block drops it, keeps the fold and inserted headings byte-identical, and is idempotent.
 #[test]
-fn rerun_with_empty_output_keeps_fold_and_drops_top() {
+fn rerun_removes_legacy_top_block_and_keeps_fold() {
     let once = enrich(&note(), &full(), &[], opts()).text;
-    let e = enrich(&once, &EnrichOutput::default(), &[], opts());
-    assert!(!e.text.contains("[!abstract]"));
-    assert!(e.text.contains("> ## Sponsor"));
-    assert!(e.text.starts_with("Welcome"));
+    let legacy = format!("{LEGACY_TOP}{once}");
+    assert!(has_legacy_top(&legacy));
+    let e = enrich(&legacy, &full(), &[], opts());
+    assert_eq!(e.text, once);
+    let empty = enrich(&legacy, &EnrichOutput::default(), &[], opts()).text;
+    assert!(!empty.contains("[!abstract]"));
+    assert!(empty.contains("> ## Sponsor"));
+    assert!(empty.starts_with("Welcome"), "{empty}");
+    assert_eq!(strip_top(&legacy).as_deref(), Some(once.as_str()));
+    assert_eq!(strip_top(&once), None);
+}
+
+/// Audit pin E1: [`strip_top`] removes only a managed `[!abstract]` block outside code fences; a
+/// fenced literal managed block and a user-authored `[!abstract]` callout survive byte-identical.
+#[test]
+fn strip_top_spares_fenced_literal_and_user_callouts() {
+    let fenced = format!("Intro.\n\n```\n{LEGACY_TOP}```\n\nText.\n");
+    assert!(!has_legacy_top(&fenced));
+    assert_eq!(strip_top(&fenced), None);
+    let user = "> [!abstract]- My own summary\n> mine\n\nText.\n";
+    assert_eq!(strip_top(user), None);
+    let fold =
+        "%% cv-enrich %%\n%% cv-fold n=1 kind=cta %%\n> [!removed]-\n> Buy.\n\n%% /cv-enrich %%\n";
+    let both = format!("{LEGACY_TOP}{fenced}{user}\n{fold}");
+    assert_eq!(
+        strip_top(&both).as_deref(),
+        Some(format!("{fenced}{user}\n{fold}").as_str())
+    );
 }
 
 /// A close marker right after a `> ` line is a lazy continuation of the callout and renders as
@@ -439,7 +468,7 @@ fn close_marker_follows_blank_line() {
     let closes: Vec<usize> = (0..lines.len())
         .filter(|&i| lines[i] == MARK_CLOSE)
         .collect();
-    assert_eq!(closes.len(), 2);
+    assert_eq!(closes.len(), 1);
     for i in closes {
         assert_eq!(lines[i - 1], "", "line before close marker {i}");
     }
@@ -462,10 +491,13 @@ fn nested_fence_and_lowercase_transcript_heading() {
     let body =
         "Intro line.\n````\n```\n# not a heading\n````\n## transcript\nSecond part starts.\n";
     let mut o = EnrichOutput::default();
-    o.summary = Some("S.".into());
+    o.chapters = vec![Chapter {
+        title: "X".into(),
+        starts_at: "Second part".into(),
+    }];
     let e = enrich(body, &o, &[], opts());
-    assert!(e.text.contains("> - [[#transcript]]"), "{}", e.text);
-    assert!(!e.text.contains("[[#not a heading]]"), "{}", e.text);
+    assert_eq!(e.text, body);
+    assert_eq!(e.report.headings_inserted, 0);
 }
 
 /// `strip_structure` removes the top block and inserted headings, keeps the fold and the text,

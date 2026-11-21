@@ -19,7 +19,7 @@ pub use lint::{
 };
 pub use ofm::frontmatter::JsValue;
 pub use transcript::{
-    TranscriptEvidence, cleanup_youtube_transcript, prefix_links_transcript,
+    TranscriptEvidence, cleanup_youtube_transcript, is_youtube_clip, prefix_links_transcript,
     restore_transcript_heading, strip_youtube_preamble, transcript_evidence,
 };
 pub use vault::{PropertyOp, PropertyOpError, VaultEditError, VaultEditPlan, plan_vault_edits};

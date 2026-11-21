@@ -1,6 +1,9 @@
 //! The model answer types and their lenient parse. Decisions recorded here:
 //! - **Span kinds**: `sponsor|cta|chrome|footer|banner` map to [`SpanKind`] variants; any other string is
 //!   kept as [`SpanKind::Other`] and folded like the rest (the model only lists removable spans).
+//! - **Retired keys**: `summary`, `entities` and `key_claims` (the old top block's content; plan
+//!   abstract-removal-confidence-deletion WP-2) are no longer requested; an answer still carrying
+//!   them is accepted and they are ignored like any unknown key (never counted in `malformed`).
 
 use std::fmt;
 
@@ -28,23 +31,6 @@ impl fmt::Display for EnrichError {
 }
 
 impl std::error::Error for EnrichError {}
-
-/// A named entity.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Entity {
-    pub name: String,
-    /// The model's `type` (person, org, …); may be empty.
-    pub kind: String,
-    pub aliases: Vec<String>,
-    pub mentions: u64,
-}
-
-/// A key claim with its supporting verbatim quote (may be empty).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Claim {
-    pub claim: String,
-    pub quote: String,
-}
 
 /// A chapter title anchored at the start of a body line.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -91,9 +77,6 @@ pub struct Span {
 /// The merged structure + cleanup answer (spike prompts; `scores` ignored).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EnrichOutput {
-    pub summary: Option<String>,
-    pub entities: Vec<Entity>,
-    pub key_claims: Vec<Claim>,
     pub chapters: Vec<Chapter>,
     pub spans: Vec<Span>,
     pub content_ends_after: Option<String>,
@@ -108,8 +91,8 @@ pub struct BannerRef(pub String);
 /// Options for [`enrich`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnrichOpts {
-    /// Render the top block and chapter headings; `false` = fold only (short bodies).
-    pub top_block: bool,
+    /// Insert chapter headings into a heading-less body; `false` = fold only (short bodies).
+    pub headings: bool,
 }
 
 /// What [`enrich`] did.
@@ -117,6 +100,9 @@ pub struct EnrichOpts {
 pub struct EnrichReport {
     pub anchors_resolved: usize,
     pub anchors_dropped: usize,
+    /// Spans that matched no body line but whose anchors are lines of the prior fold (already
+    /// applied by an earlier run; neither resolved nor dropped).
+    pub anchors_already_folded: usize,
     /// Disjoint fold groups added by this run.
     pub spans_folded: usize,
     /// Lines moved into the fold by this run (spans + banners).
@@ -124,7 +110,6 @@ pub struct EnrichReport {
     /// Of `lines_folded`, lines folded as banners.
     pub banners_folded: usize,
     pub fold_refused_over_half: bool,
-    pub top_block: bool,
     pub headings_inserted: usize,
 }
 
@@ -162,44 +147,7 @@ pub fn parse(text: &str) -> Result<EnrichOutput, EnrichError> {
     let mut out = EnrichOutput::default();
     let bad = &mut out.malformed;
 
-    out.summary = opt_string(obj.get("summary"), bad);
     out.content_ends_after = opt_string(obj.get("content_ends_after"), bad);
-    out.entities = items(obj.get("entities"), bad, |o| {
-        let name = squeeze(o.get("name")?.as_str()?);
-        if name.is_empty() {
-            return None;
-        }
-        Some(Entity {
-            name,
-            kind: o
-                .get("type")
-                .and_then(Value::as_str)
-                .map(squeeze)
-                .unwrap_or_default(),
-            aliases: o
-                .get("aliases")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            mentions: o.get("mentions").and_then(Value::as_u64).unwrap_or(0),
-        })
-    });
-    out.key_claims = items(obj.get("key_claims"), bad, |o| {
-        let claim = squeeze(o.get("claim")?.as_str()?);
-        if claim.is_empty() {
-            return None;
-        }
-        let quote = match o.get("quote") {
-            None | Some(Value::Null) => String::new(),
-            Some(q) => q.as_str()?.to_owned(),
-        };
-        Some(Claim { claim, quote })
-    });
     out.chapters = items(obj.get("chapters"), bad, |o| {
         Some(Chapter {
             title: o.get("title")?.as_str()?.to_owned(),
