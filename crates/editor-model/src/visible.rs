@@ -11,6 +11,7 @@
 //! text, blocks are separated by a blank line.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::props::{PropValue, Property};
@@ -260,14 +261,69 @@ pub fn transclusion_label(target: &str, fragment: Option<&String>) -> String {
     }
 }
 
-struct Walk {
+/// Plan abstract-removal-confidence-deletion WP-5: callouts are numbered in pre-order over the
+/// blocks then the footnotes (a callout before its children, children in order, transcluded
+/// content included). A callout's fold state is its marker (`-` collapsed, `+` open, plain not
+/// foldable) with the ids in a `flipped` set inverted; the walker and the Reading view both
+/// number through this one scheme, so they skip exactly the same children.
+#[must_use]
+pub fn is_collapsed(fold: Option<Fold>, id: usize, flipped: &BTreeSet<usize>) -> bool {
+    match fold {
+        Some(f) => (f == Fold::Folded) != flipped.contains(&id),
+        None => false,
+    }
+}
+
+fn collect_folds(blocks: &[Block], out: &mut Vec<Option<Fold>>) {
+    for b in blocks {
+        match b {
+            Block::Callout { fold, children, .. } => {
+                out.push(*fold);
+                collect_folds(children, out);
+            }
+            Block::BlockQuote(c) => collect_folds(c, out),
+            Block::List { items, .. } => {
+                items.iter().for_each(|it| collect_folds(&it.children, out))
+            }
+            Block::Transclusion {
+                content: Some(c), ..
+            } => collect_folds(c, out),
+            _ => {}
+        }
+    }
+}
+
+/// How many callouts `blocks` hold (nested and transcluded ones included): the ids a skipped
+/// subtree consumes.
+#[must_use]
+pub fn count_callouts(blocks: &[Block]) -> usize {
+    let mut v = Vec::new();
+    collect_folds(blocks, &mut v);
+    v.len()
+}
+
+/// The fold marker of every callout of `model` in id order (`None` = plain, not foldable).
+#[must_use]
+pub fn callout_folds(model: &RenderModel) -> Vec<Option<Fold>> {
+    let mut v = Vec::new();
+    collect_folds(&model.blocks, &mut v);
+    for f in &model.footnotes {
+        collect_folds(&f.blocks, &mut v);
+    }
+    v
+}
+
+struct Walk<'f> {
+    flipped: &'f BTreeSet<usize>,
+    /// The id of the next callout (see [`is_collapsed`]).
+    next_callout: usize,
     out: Vec<VisRun>,
     /// Separator + prefix for the next run (a list item's or footnote's first run).
     pending: Option<(Sep, String)>,
     part: Part,
 }
 
-impl Walk {
+impl Walk<'_> {
     fn push(&mut self, run: Inlined, sep: Sep, image: bool) {
         let (sep, prefix) = self.pending.take().unwrap_or((sep, String::new()));
         self.out.push(VisRun {
@@ -335,10 +391,19 @@ impl Walk {
                 fold,
                 children,
             } => {
-                let head = callout_title(kind, title.as_ref(), *fold);
+                let id = self.next_callout;
+                self.next_callout += 1;
+                let collapsed = is_collapsed(*fold, id, self.flipped);
+                let shown = fold.map(|_| if collapsed { Fold::Folded } else { Fold::Open });
+                let head = callout_title(kind, title.as_ref(), shown);
                 self.push_text(head, Vec::new(), sep, false);
-                for c in children {
-                    self.block(c, depth);
+                if collapsed {
+                    // The children give no runs; their callouts still consume ids.
+                    self.next_callout += count_callouts(children);
+                } else {
+                    for c in children {
+                        self.block(c, depth);
+                    }
                 }
             }
             Block::CodeBlock { text, .. } => {
@@ -375,7 +440,14 @@ impl Walk {
 
 /// The visible runs of `model`, in render order (see the module docs).
 pub fn visible_runs(model: &RenderModel) -> Vec<VisRun> {
+    visible_runs_with(model, &BTreeSet::new())
+}
+
+/// [`visible_runs`] with the callout fold state `flipped` (ids inverted from their markers).
+pub fn visible_runs_with(model: &RenderModel, flipped: &BTreeSet<usize>) -> Vec<VisRun> {
     let mut w = Walk {
+        flipped,
+        next_callout: 0,
         out: Vec::new(),
         pending: None,
         part: Part::Properties,
@@ -572,5 +644,66 @@ mod tests {
         assert_eq!(ordinal(&occ, 0, 1), Some(1));
         assert_eq!(ordinal(&occ, 0, 2), None);
         assert_eq!(ordinal(&occ, 1, 0), None);
+    }
+
+    /// WP-5: a collapsed callout yields its title run and no child run or find match; the run
+    /// after it is unchanged; a flip brings the children back (and the marker follows).
+    #[test]
+    fn collapsed_callout_yields_title_only() {
+        let m = lower("> [!note]- Folded\n> hidden zeta\n\nafter zeta\n");
+        let rs = visible_runs(&m);
+        assert_eq!(texts(&rs), vec!["▸ Folded", "after zeta"]);
+        let occ = occurrences(&rs, "zeta");
+        assert_eq!(occ.len(), 1);
+        assert_eq!(rs[occ[0].run].text, "after zeta");
+        let open = visible_runs_with(&m, &BTreeSet::from([0]));
+        assert_eq!(texts(&open), vec!["▾ Folded", "hidden zeta", "after zeta"]);
+        let occ = occurrences(&open, "zeta");
+        assert_eq!(occ.len(), 2);
+        assert_eq!(open[occ[1].run].text, "after zeta");
+    }
+
+    /// WP-5: `+` starts open and collapses on a flip; a plain callout ignores a flip.
+    #[test]
+    fn plus_callout_collapses_and_plain_ignores_flip() {
+        let m = lower("> [!tip]+ Open\n> body\n\n> [!note] Plain\n> plain body\n");
+        assert_eq!(callout_folds(&m), vec![Some(Fold::Open), None]);
+        let none = BTreeSet::new();
+        assert_eq!(
+            texts(&visible_runs_with(&m, &none)),
+            vec!["▾ Open", "body", "Plain", "plain body"]
+        );
+        let flip = BTreeSet::from([0, 1]);
+        assert_eq!(
+            texts(&visible_runs_with(&m, &flip)),
+            vec!["▸ Open", "Plain", "plain body"]
+        );
+    }
+
+    /// WP-5: a collapsed parent hides an open child whatever the child's state, and the ids of
+    /// a skipped subtree stay consumed (the callout after it is still id 2).
+    #[test]
+    fn collapsed_parent_hides_open_child_and_keeps_ids() {
+        let m =
+            lower("> [!note]- Parent\n> > [!tip]+ Child\n> > inner\n\n> [!note]+ Sibling\n> sib\n");
+        assert_eq!(
+            callout_folds(&m),
+            vec![Some(Fold::Folded), Some(Fold::Open), Some(Fold::Open)]
+        );
+        let t = |f: &[usize]| {
+            visible_runs_with(&m, &f.iter().copied().collect())
+                .into_iter()
+                .map(|r| r.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(t(&[]), vec!["▸ Parent", "▾ Sibling", "sib"]);
+        // Flipping the child (open -> collapsed) changes nothing while the parent is collapsed.
+        assert_eq!(t(&[1]), vec!["▸ Parent", "▾ Sibling", "sib"]);
+        assert_eq!(
+            t(&[0]),
+            vec!["▾ Parent", "▾ Child", "inner", "▾ Sibling", "sib"]
+        );
+        assert_eq!(t(&[0, 1]), vec!["▾ Parent", "▸ Child", "▾ Sibling", "sib"]);
+        assert_eq!(t(&[2]), vec!["▸ Parent", "▸ Sibling"]);
     }
 }

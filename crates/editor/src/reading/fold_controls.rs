@@ -83,6 +83,20 @@ pub fn controls(blocks: &[Block], groups: &[FoldGroup]) -> Option<FoldControls> 
     })
 }
 
+/// WP-5: the rows drawn for a fold that is `collapsed` (none: only the title, its line count and
+/// "Delete all" stay) or open (all). The rows — and the [`RemovalOp`]s they carry — are the same
+/// either way; only what is drawn differs.
+#[must_use]
+pub fn shown_rows(rows: &[FoldRow], collapsed: bool) -> &[FoldRow] {
+    if collapsed { &[] } else { rows }
+}
+
+/// WP-5: the line count a collapsed fold's title shows (every group's lines).
+#[must_use]
+pub fn line_count(rows: &[FoldRow]) -> usize {
+    rows.iter().map(|r| r.lines).sum()
+}
+
 /// What the fold title's "Delete all" sends.
 #[must_use]
 pub fn delete_all() -> RemovalOp {
@@ -172,5 +186,27 @@ mod tests {
         assert_eq!(c.block, removed[0]);
         assert_eq!(c.rows, rows(&groups));
         assert_eq!(controls(&blocks, &[]), None);
+    }
+
+    /// WP-5 requirement: a collapsed fold draws no group rows but keeps its line count; the ops
+    /// are those of the open fold (and "Delete all" does not depend on the state at all).
+    #[test]
+    fn collapsed_fold_hides_rows_keeps_count_and_ops() {
+        let fold = "%% cv-enrich %%\n> [!removed]-\n> a\n> b\n>\n> c\n\n%% /cv-enrich %%\n";
+        let groups = fold_groups(&format!("x\n\n{fold}"));
+        let all = rows(&groups);
+        assert!(!all.is_empty());
+        assert_eq!(shown_rows(&all, true), &[] as &[FoldRow]);
+        assert_eq!(shown_rows(&all, false), all.as_slice());
+        assert_eq!(
+            line_count(&all),
+            groups.iter().map(|g| g.lines.len()).sum::<usize>()
+        );
+        assert!(line_count(&all) > 0);
+        // The same groups either way: rows (hence ops) are built from `groups` alone, and the
+        // fold controls the view receives do not depend on the callout state.
+        let blocks = editor_model::render::lower(&format!("x\n\n{fold}")).blocks;
+        let c = controls(&blocks, &groups).expect("controls");
+        assert_eq!(c.rows, all);
     }
 }

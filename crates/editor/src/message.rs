@@ -277,6 +277,10 @@ pub enum ReadingMsg {
         note: cv_protocol::NoteId,
         op: cv_protocol::RemovalOp,
     },
+    /// Plan abstract-removal-confidence-deletion WP-5: a click on the title of a foldable
+    /// callout of `path`'s Reading view; `callout` = its pre-order id
+    /// (`editor_model::visible::is_collapsed`). In memory only; an unknown id is ignored.
+    ToggleFold { path: String, callout: usize },
     /// Toggle the active tab's mode Source ↔ Reading; Split → Source (Ctrl+E; the palette too).
     CycleMode,
     /// Set a tab's mode by path.

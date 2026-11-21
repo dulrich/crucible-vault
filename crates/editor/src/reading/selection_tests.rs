@@ -538,6 +538,10 @@ fn fold_controls_are_drawn_only_for_a_fold_with_groups() {
             .fold_controls = None;
     };
     let mut h = H::new(&body);
+    // WP-5: the `-` fold starts collapsed (title, line count, Delete all; no rows, no lines);
+    // the group rows and the fold's own lines are the expanded drawing measured here.
+    assert_eq!(h.boxes().len(), 3, "intro, title, end: {:?}", h.run_texts());
+    h.toggle(0);
     let with = last_y(&mut h);
     clear(&mut h);
     let without = last_y(&mut h);
@@ -547,4 +551,122 @@ fn fold_controls_are_drawn_only_for_a_fold_with_groups() {
     let a = last_y(&mut plain);
     clear(&mut plain);
     assert_eq!(a, last_y(&mut plain));
+}
+
+// ---- plan abstract-removal-confidence-deletion WP-5: collapsible callouts ----
+
+impl H {
+    fn run_texts(&self) -> Vec<String> {
+        let d = self.store.doc(&self.docs, PATH).expect("doc");
+        d.runs.iter().map(|r| r.text.clone()).collect()
+    }
+
+    fn toggle(&mut self, callout: usize) {
+        let m = ReadingMsg::ToggleFold {
+            path: PATH.into(),
+            callout,
+        };
+        let _ = update(&mut self.store, m, &mut self.docs, None, None);
+    }
+
+    /// The drawn run boxes agree with the walked runs (view and walker skip the same children).
+    fn assert_aligned(&mut self) {
+        let n = self.run_texts().len();
+        assert_eq!(self.boxes().len(), n, "{:?}", self.run_texts());
+    }
+}
+
+/// Seam: the real `view::reading` tree (headless) against `Doc::runs`. A `-` callout draws its
+/// title only; a click on the title sends the toggle; a toggle re-walks the runs, the drawn
+/// boxes stay aligned with them, and a find match after the callout stays on its own text.
+#[test]
+fn folded_callout_title_click_toggles_and_find_stays_aligned() {
+    let mut h = H::new("> [!note]- Folded\n> hidden zeta\n\nafter zeta\n");
+    assert_eq!(h.run_texts(), vec!["▸ Folded", "after zeta"]);
+    h.assert_aligned();
+    h.find = Some(("zeta", Some(0)));
+    let doc = h.store.doc(&h.docs, PATH).expect("doc");
+    let occ = editor_model::visible::occurrences(&doc.runs, "zeta");
+    assert_eq!(doc.runs[occ[0].run].text, "after zeta");
+
+    let at = h.pt(SelPos::new(0, 3));
+    h.click(at);
+    let sent: Vec<usize> = h
+        .other
+        .iter()
+        .filter_map(|m| match m {
+            Message::Reading(ReadingMsg::ToggleFold { callout, .. }) => Some(*callout),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, vec![0], "{:?}", h.other);
+
+    h.toggle(0);
+    assert_eq!(h.run_texts(), vec!["▾ Folded", "hidden zeta", "after zeta"]);
+    h.assert_aligned();
+    let doc = h.store.doc(&h.docs, PATH).expect("doc");
+    let occ = editor_model::visible::occurrences(&doc.runs, "zeta");
+    assert_eq!(occ.len(), 2);
+    assert_eq!(doc.runs[occ[1].run].text, "after zeta");
+
+    h.toggle(0);
+    assert_eq!(h.run_texts(), vec!["▸ Folded", "after zeta"]);
+    h.assert_aligned();
+}
+
+/// `+` toggles; a plain callout ignores a toggle and its title sends none; an unknown id is
+/// ignored (no state change); reopening the note resets to the markers.
+#[test]
+fn plus_toggles_plain_and_unknown_are_ignored_and_reopen_resets() {
+    let text = "> [!tip]+ Open\n> body\n\n> [!note] Plain\n> plain body\n";
+    let mut h = H::new(text);
+    let open = vec!["▾ Open", "body", "Plain", "plain body"];
+    assert_eq!(h.run_texts(), open);
+    h.toggle(1); // plain
+    h.toggle(2); // out of range
+    h.toggle(usize::MAX);
+    assert_eq!(h.run_texts(), open);
+    h.toggle(0);
+    assert_eq!(h.run_texts(), vec!["▸ Open", "Plain", "plain body"]);
+    h.assert_aligned();
+    // The plain title is not clickable.
+    let at = h.pt(SelPos::new(1, 2));
+    h.click(at);
+    assert!(
+        !h.other
+            .iter()
+            .any(|m| matches!(m, Message::Reading(ReadingMsg::ToggleFold { .. }))),
+        "{:?}",
+        h.other
+    );
+    // Reopen: a fresh document entry starts at the markers.
+    let mut h2 = H::new(text);
+    assert_eq!(h2.run_texts(), open);
+    h2.assert_aligned();
+}
+
+/// Nested callouts keep their own state; the view numbers them as the walker does even after a
+/// collapsed parent skipped a subtree (the sibling is id 2 in both).
+#[test]
+fn nested_callout_ids_agree_between_view_and_walker() {
+    let mut h = H::new(
+        "> [!note]- Parent\n> > [!tip]+ Child\n> > inner\n\n> [!note]+ Sibling\n> sib\n\nend\n",
+    );
+    assert_eq!(h.run_texts(), vec!["▸ Parent", "▾ Sibling", "sib", "end"]);
+    h.assert_aligned();
+    h.toggle(2);
+    assert_eq!(h.run_texts(), vec!["▸ Parent", "▸ Sibling", "end"]);
+    h.assert_aligned();
+    h.toggle(0);
+    assert_eq!(
+        h.run_texts(),
+        vec!["▾ Parent", "▾ Child", "inner", "▸ Sibling", "end"]
+    );
+    h.assert_aligned();
+    h.toggle(1);
+    assert_eq!(
+        h.run_texts(),
+        vec!["▾ Parent", "▸ Child", "▸ Sibling", "end"]
+    );
+    h.assert_aligned();
 }

@@ -74,6 +74,8 @@ struct Ctx<'a, 'c> {
     /// The next [`VisRun`] of `doc.runs` to draw — the tree is drawn in the
     /// order [`editor_model::visible::visible_runs`] walked it, so run `i` is `doc.runs[i]`.
     cursor: &'c Cell<usize>,
+    /// The next callout id (pre-order, as the run walker numbers them; WP-5).
+    callouts: &'c Cell<usize>,
     /// The find query's occurrences over `doc.runs` (empty without find paint), and the index
     /// of the strong one (the focused pane's bar, at view time).
     occ: &'c [Occurrence],
@@ -163,6 +165,7 @@ pub fn reading<'a>(
         return text("Rendering…").color(t.text_faint.to_color()).into();
     };
     let cursor = Cell::new(0);
+    let callouts = Cell::new(0);
     let occ = find.map_or_else(Vec::new, |f| {
         editor_model::visible::occurrences(&doc.runs, f.query)
     });
@@ -178,6 +181,7 @@ pub fn reading<'a>(
         scale,
         strike: false,
         cursor: &cursor,
+        callouts: &callouts,
         occ: &occ,
         active: find.and_then(|f| f.active),
         sel: store.selection(docs, path, view),

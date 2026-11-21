@@ -146,6 +146,7 @@ impl ReadingMsg {
             | Self::TitleFocus { .. }
             | Self::Select { .. }
             | Self::Removals { .. }
+            | Self::ToggleFold { .. }
             | Self::Copy { .. } => MsgKind::Input,
         }
     }

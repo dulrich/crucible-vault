@@ -128,6 +128,10 @@ pub struct Doc {
     /// The visible runs in render order (the one walk — the view draws them, the
     /// selection copies them, find counts over them).
     pub runs: Vec<VisRun>,
+    /// Plan abstract-removal-confidence-deletion WP-5: the callouts (pre-order ids, see
+    /// `editor_model::visible::is_collapsed`) whose fold state is inverted from their marker —
+    /// the state `runs` was walked with and the view draws with.
+    pub flipped: std::collections::BTreeSet<usize>,
     /// Plan round-6 WP-4: link targets (as [`render::link_targets`] lists them, the string the
     /// view hands to `OpenLink`) that do not resolve — drawn dimmed, menu offers "Create note".
     /// Empty without a daemon (no resolver: nothing is known missing).
@@ -147,6 +151,10 @@ pub struct Doc {
 pub struct DocReading {
     pub mode: ViewMode,
     pub doc: Option<Doc>,
+    /// Plan abstract-removal-confidence-deletion WP-5: the callout ids whose fold state was
+    /// toggled away from their marker. In memory, per open document: a close drops it, so a
+    /// reopened note starts at its markers; nothing is written to the note.
+    flipped: std::collections::BTreeSet<usize>,
     /// The `edit_seq` seen at the previous tick (debounce).
     seen_seq: Option<u64>,
     /// The pending filename-input edit (absent = shows the stem).
@@ -442,7 +450,14 @@ impl ReadingStore {
             }
         }
         self.images.retain_owner(doc.path(), &keep);
-        let runs = editor_model::visible::visible_runs(&model);
+        // WP-5: a flipped id that is no longer a foldable callout is dropped; the rest is the
+        // callout fold state this Doc's runs and drawing share.
+        let folds = editor_model::visible::callout_folds(&model);
+        od.reading
+            .flipped
+            .retain(|id| matches!(folds.get(*id), Some(Some(_))));
+        let flipped = od.reading.flipped.clone();
+        let runs = editor_model::visible::visible_runs_with(&model, &flipped);
         let resolver_epoch = self.resolver.epoch();
         let epoch = doc.epoch();
         let entry = &mut od.reading;
@@ -460,10 +475,33 @@ impl ReadingStore {
             pdfs,
             pdf_pages,
             runs,
+            flipped,
             unresolved,
             fold_groups,
             fold_controls,
         });
+    }
+
+    /// Plan abstract-removal-confidence-deletion WP-5: flips the fold state of callout `id` of
+    /// `od`'s current Doc and re-walks the runs. An id that is not a foldable callout of the
+    /// shown Doc (out of range, plain, no Doc) is ignored — no state change.
+    pub fn toggle_fold(
+        &mut self,
+        od: &mut OpenDoc,
+        id: usize,
+        daemon: Option<&Arc<dyn DaemonClient>>,
+    ) {
+        let Some(doc) = od.reading.doc.as_ref() else {
+            return;
+        };
+        let folds = editor_model::visible::callout_folds(&doc.model);
+        if !matches!(folds.get(id), Some(Some(_))) {
+            return;
+        }
+        if !od.reading.flipped.remove(&id) {
+            od.reading.flipped.insert(id);
+        }
+        self.recompute(od, daemon);
     }
 
     /// Debounce: re-render `od` once its `edit_seq` held still for a tick (or the index moved).
@@ -784,6 +822,11 @@ fn update_store(
         | ReadingMsg::TitleFocus { .. } => {}
         // Handled by `App` before it reaches the reading reducer (it saves, then asks the daemon).
         ReadingMsg::Removals { .. } => {}
+        ReadingMsg::ToggleFold { path, callout } => {
+            if let Some(od) = docs.get_mut(&path) {
+                store.toggle_fold(od, callout, daemon);
+            }
+        }
         ReadingMsg::OpenLink {
             src,
             target,

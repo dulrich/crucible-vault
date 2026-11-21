@@ -54,10 +54,14 @@ pub(super) fn callout<'a>(
     fold_rows: Option<&[crate::reading::fold_controls::FoldRow]>,
 ) -> Element<'a, Message> {
     let t = cx.t;
-    let marker = match fold {
-        Some(Fold::Folded) => "▸ ",
-        Some(Fold::Open) => "▾ ",
-        None => "",
+    // WP-5: pre-order id (the walker numbers the same way), then the state: marker ± flips.
+    let id = cx.callouts.get();
+    cx.callouts.set(id + 1);
+    let collapsed = editor_model::visible::is_collapsed(fold, id, &cx.doc.flipped);
+    let marker = match (fold, collapsed) {
+        (Some(_), true) => "▸ ",
+        (Some(_), false) => "▾ ",
+        (None, _) => "",
     };
     let head = format!(
         "{marker}{}",
@@ -69,23 +73,44 @@ pub(super) fn callout<'a>(
         vec![span(head).color(edge.to_color())],
         cx.sz(16.0),
     );
+    // A foldable callout's title toggles it (a press the selection does not see).
+    let head_run: Element<'a, Message> = if fold.is_some() {
+        iced::widget::mouse_area(head_run)
+            .on_press(Message::Reading(ReadingMsg::ToggleFold {
+                path: cx.path.to_owned(),
+                callout: id,
+            }))
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into()
+    } else {
+        head_run
+    };
     let mut col: Vec<Element<'a, Message>> = Vec::new();
     if let Some(rows) = fold_rows {
         let msg = |op| Message::Reading(ReadingMsg::Removals { note: cx.note, op });
+        let mut title = row![container(head_run).width(Length::Fill)]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center);
+        if collapsed {
+            // Collapsed: the line count stands in for the per-group rows.
+            let n = crate::reading::fold_controls::line_count(rows);
+            title = title.push(
+                text(format!("{n} lines"))
+                    .size(cx.sz(12.0))
+                    .color(t.text_faint.to_color()),
+            );
+        }
         col.push(
-            row![
-                container(head_run).width(Length::Fill),
-                fold_button(
+            title
+                .push(fold_button(
                     cx,
                     "Delete all",
-                    msg(crate::reading::fold_controls::delete_all())
-                ),
-            ]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center)
-            .into(),
+                    msg(crate::reading::fold_controls::delete_all()),
+                ))
+                .into(),
         );
-        for r in rows {
+        // The per-group rows only while expanded.
+        for r in crate::reading::fold_controls::shown_rows(rows, collapsed) {
             let label = r.kind.clone().unwrap_or_default();
             let info = if r.preview.is_empty() {
                 format!("{} lines", r.lines)
@@ -109,8 +134,13 @@ pub(super) fn callout<'a>(
     } else {
         col.push(head_run);
     }
-    // Folding is shown by the marker; the body stays readable (no fold state in v0).
-    col.extend(children.iter().map(|c| block(cx, c)));
+    if collapsed {
+        // Title only: no children, no height; their callouts still consume ids.
+        cx.callouts
+            .set(cx.callouts.get() + editor_model::visible::count_callouts(children));
+    } else {
+        col.extend(children.iter().map(|c| block(cx, c)));
+    }
     boxed(column(col).spacing(6).into(), t, edge)
 }
 
