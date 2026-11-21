@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.3.0 — 2026-11-21
+
+### Added
+
+- Enrich: the `intake_enrich` step key `delete_confidence` (0.0–1.0, default 0 = off). With it set, removed lines whose every claiming span has a confidence at or over the value are deleted and not folded; lines also claimed by `content_ends_after` or a banner, lines with a Keep label, lines in a code fence and lines an earlier fold group is anchored on still fold. Outcome vars `lines_deleted` and `spans_deleted`. It ships off and no migration sets it: in the validation run the model gave every span a confidence of 0.95 or higher, so its confidence cannot pick what is safe to delete (D37).
+- `intake_enrich` `scope = "strip-top"` and the `intake-abstract-strip` action: remove the Abstract block from existing notes without a model call (counts `candidates`, `stripped`, `heading_restored`, `strip_conflict`).
+- Editor: Reading draws a collapsed (`-`) callout as its title line; a click on the title of a `-` or `+` callout expands or collapses it. The state is per open document and resets when the note is reopened.
+- Migration `0044`: updates the live `Intake Enrich.md` prompt, removes `intake-enrich-recover`, adds `intake-abstract-strip`, then runs the sources re-scan, the strip and the reconcile.
+
+### Changed
+
+- Enrich no longer writes the `[!abstract]` block at the top of a note, and the prompt no longer asks for a summary, entities or key claims. Any enrich write removes an existing block. The `top_block` outcome var is gone.
+- Enrich misses: a long note is a miss only when the reply asked for anchors and none resolved or matched the note's existing fold. A long note with nothing to change is stamped `enriched`.
+- Boilerplate learning and removal labels match lines by a date-masked key (digits and English month and weekday names are masked), so a header that carries the issue date is learned and removed like other recurring lines, and a Delete or Keep on one dated line applies to the same line with another date. A Keep wins over a Delete on the same key. `state.db` moves to schema v21, which clears the learned line sets; the next reconcile rebuilds them. Labels are kept.
+- A YouTube clip keeps its `## Transcript` heading because of its source URL, no longer because the Abstract block's Contents list linked it.
+- Removals review: a `[!removed]` fold is drawn collapsed with its title, line count and "Delete all"; the Delete / Keep rows show once it is expanded.
+
+### Removed
+
+- Enrich recovery: `scope = "recover"` is refused and the `intake-enrich-recover` action is removed from the example config (migration `0044` removes it from the live config).
+
+### Known limits
+
+- A click on a foldable callout title toggles it and does not start a text selection.
+- A callout's expanded or collapsed state is tracked by position, so an edit that adds or removes a callout can move the state to a neighbouring callout.
+
 ## 1.2.1 — 2026-11-17
 
 ### Changed
