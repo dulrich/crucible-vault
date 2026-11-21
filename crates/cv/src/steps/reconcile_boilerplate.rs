@@ -136,12 +136,12 @@ pub(super) fn apply(
     }
 }
 
-/// The distinct persisted line keys of one body.
+/// The distinct persisted (masked, [`boilerplate::masked_key`]) line keys of one body.
 fn line_keys(body: &str) -> Vec<u64> {
     let keys: BTreeSet<u64> = body
         .lines()
         .filter_map(boilerplate::normalize_line)
-        .map(|n| boilerplate::line_key(&n))
+        .map(|n| boilerplate::masked_key(&n))
         .collect();
     keys.into_iter().collect()
 }
@@ -149,10 +149,10 @@ fn line_keys(body: &str) -> Vec<u64> {
 /// One publication's labels from `state.db`.
 fn load_labels(ctx: &StepCtx<'_>, publication: &str) -> Result<Labels, StepError> {
     let l = ctx.state().publication_labels(publication)?;
-    Ok(Labels {
-        keep: l.keep.into_iter().collect(),
-        delete: l.delete.into_iter().collect(),
-    })
+    Ok(Labels::from_lines(
+        l.keep.iter().map(String::as_str),
+        l.delete.iter().map(String::as_str),
+    ))
 }
 
 /// Capture: learns `body` (the cleaned, pre-strip body) for `source_key` (the record name) once by

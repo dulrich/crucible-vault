@@ -12,13 +12,16 @@ use rusqlite::types::{FromSqlError, ValueRef};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
-/// One publication's labelled line keys, by verdict.
+/// One publication's labelled lines, by verdict (plan `abstract-removal-confidence-deletion`
+/// WP-4 label contract): the stored `line` text, which the caller keys with
+/// `cv_ingest::boilerplate::Labels::from_lines` (the masked tier key). The stored exact
+/// `line_key` column is not used for lookup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PublicationLabels {
-    /// Distinct keys labelled `keep`.
-    pub keep: Vec<u64>,
-    /// Distinct keys labelled `delete`.
-    pub delete: Vec<u64>,
+    /// Distinct lines labelled `keep`, sorted.
+    pub keep: Vec<String>,
+    /// Distinct lines labelled `delete`, sorted.
+    pub delete: Vec<String>,
 }
 
 /// One `removal_labels` row (without its id). Field names match the columns.
@@ -71,18 +74,19 @@ impl StateDb {
         Ok(rows.len())
     }
 
-    /// One publication's labelled line keys (plan WP-5's label tiers): the distinct keys
-    /// labelled `keep` and those labelled `delete`. A blank `publication` has no labels.
+    /// One publication's labelled lines (the tiers' labels): the distinct stored lines labelled
+    /// `keep` and those labelled `delete`. A blank `publication` has no labels.
     pub fn publication_labels(&self, publication: &str) -> Result<PublicationLabels> {
         let mut out = PublicationLabels::default();
         if publication.trim().is_empty() {
             return Ok(out);
         }
         let mut stmt = self.conn().prepare_cached(
-            "SELECT DISTINCT line_key, verdict FROM removal_labels WHERE publication = ?1",
+            "SELECT DISTINCT line, verdict FROM removal_labels WHERE publication = ?1
+             ORDER BY line, verdict",
         )?;
         let rows = stmt.query_map(params![publication], |r| {
-            Ok((from_db(r.get(0)?), verdict_at(r, 1)?))
+            Ok((r.get::<_, String>(0)?, verdict_at(r, 1)?))
         })?;
         for row in rows {
             let (k, v) = row?;

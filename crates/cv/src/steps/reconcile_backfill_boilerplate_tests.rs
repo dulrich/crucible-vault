@@ -205,8 +205,11 @@ fn rss_note(i: usize, top: bool) -> String {
     } else {
         ""
     };
+    // Body lines differ by a word, not a number: the masked key would make `Post 1 …` and
+    // `Post 2 …` the same line.
+    let w = ["alpha", "bravo", "charlie", "delta", "echo"][i];
     format!(
-        "---\ntitle: \"P{i}\"\npublication: \"Feed Pub\"\npost-id: \"p{i}\"\n---\n{top}Post {i} opening paragraph words.\n\nPost {i} second paragraph words.\n\nPost {i} third paragraph words.\n\nPost {i} fourth paragraph words.\n\n{RSS_FOOT1}\n\n{RSS_FOOT2}\n"
+        "---\ntitle: \"P{i}\"\npublication: \"Feed Pub\"\npost-id: \"p{i}\"\n---\n{top}Post {w} opening paragraph words.\n\nPost {w} second paragraph words.\n\nPost {w} third paragraph words.\n\nPost {w} fourth paragraph words.\n\n{RSS_FOOT1}\n\n{RSS_FOOT2}\n"
     )
 }
 
@@ -334,4 +337,53 @@ fn mail_capture_keeps_a_keep_labelled_footer_line_and_strips_the_rest() {
     assert!(n(&o, "bp_lines_vetoed") >= 1);
     assert!(note_of(&w, "Newsbit", "m1@plain.example").contains(FOOT1));
     assert!(!note_of(&w, "Newsbit", "m1@plain.example").contains(FOOT2));
+}
+
+// ---- date-masked keys (plan abstract-removal-confidence-deletion WP-4) ------------------------
+
+/// A note whose `publication` is missing (stale) gets no label tiers on the first reconcile (the
+/// tiers run before the publication phase backfills it); the second applies the Delete recorded
+/// on another date's header (masked key); a third writes nothing.
+#[test]
+fn stale_publication_note_gets_the_masked_delete_on_the_second_reconcile() {
+    let header = "Example News AM edition for Tuesday 14 Oct 2026";
+    let a = bp_note("Alpha").replacen("\n\nAlpha one", &format!("\n\n{header}\n\nAlpha one"), 1);
+    let b = bp_note("Beta");
+    let w = {
+        let mut w = world(&[("Letters/a.md", a), ("Letters/b.md", b)]);
+        w.sources(HEATMAP);
+        w
+    };
+    for (id, p) in [
+        ("m1@plain.example", "Letters/a.md"),
+        ("m2@plain.example", "Letters/b.md"),
+    ] {
+        add_row(&w, KIND, "Newsbit", id, TrackerOutcome::Note, Some(p));
+    }
+    add_labels(
+        &w,
+        &[label(
+            "Newsbit",
+            "Example News AM edition for Friday 3 Jan 2025",
+            "delete",
+        )],
+    );
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "bp_stripped"), 2);
+    let t = w.env.read("Letters/a.md").unwrap();
+    assert!(t.contains(header) && !t.contains(FOOT1), "{t}");
+    assert!(
+        t.contains("publication:"),
+        "backfilled after the tiers: {t}"
+    );
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "bp_stripped"), n(&o, "bp_lines_deleted")), (1, 1));
+    let settled = w.env.read("Letters/a.md").unwrap();
+    assert!(
+        !settled.contains(header) && settled.contains("Alpha one is here."),
+        "{settled}"
+    );
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "bp_stripped"), n(&o, "bp_learned")), (0, 0));
+    assert_eq!(w.env.read("Letters/a.md").unwrap(), settled);
 }

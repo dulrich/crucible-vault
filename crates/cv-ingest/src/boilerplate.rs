@@ -21,14 +21,107 @@ pub fn normalize_line(line: &str) -> Option<String> {
     (n.chars().count() > MIN_CHARS).then_some(n)
 }
 
-/// FNV-1a 64 of the normalized line: stable across runs and platforms.
+/// FNV-1a 64 of the normalized line, exactly as written: stable across runs and platforms. This
+/// is the **stored** key only (`removal_labels.line_key`, written as before); every tier —
+/// learning, recurrence and label lookup — keys lines by [`masked_key`].
 pub fn line_key(normalized: &str) -> u64 {
     normalized.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
 
-/// How many messages of one sender contained each normalized line, keyed by [`line_key`].
+/// English month and weekday names (full and three-letter forms) masked by [`mask`].
+const DATE_WORDS: [&str; 38] = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "sept",
+    "oct",
+    "nov",
+    "dec",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+    "sat",
+    "sun",
+];
+/// Placeholder for a digit run (a control char, so it never collides with literal text).
+const DIGITS: char = '\u{1}';
+/// Placeholder for a month or weekday name.
+const DATE_WORD: char = '\u{2}';
+
+/// The date-masked form of a normalized line (plan `abstract-removal-confidence-deletion` WP-4,
+/// `docs/spikes/removal-tiers/mask_sim.pl`): each digit run (URLs included) becomes one
+/// placeholder, and each whole word (a maximal run of alphanumerics and `_`) that is an English
+/// month or weekday name, case-insensitively, becomes another. A word mixing letters and digits
+/// (`Jan5`) only has its digits masked, as the simulation's `\b` does.
+pub fn mask(normalized: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(normalized.len());
+    let mut rest = normalized;
+    while let Some(c) = rest.chars().next() {
+        if !word(c) {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        let end = rest.find(|c: char| !word(c)).unwrap_or(rest.len());
+        let w = &rest[..end];
+        rest = &rest[end..];
+        if DATE_WORDS.iter().any(|d| d.eq_ignore_ascii_case(w)) {
+            out.push(DATE_WORD);
+            continue;
+        }
+        let mut in_digits = false;
+        for ch in w.chars() {
+            if ch.is_ascii_digit() {
+                if !in_digits {
+                    out.push(DIGITS);
+                }
+                in_digits = true;
+            } else {
+                out.push(ch);
+                in_digits = false;
+            }
+        }
+    }
+    out
+}
+
+/// The one tier key of a normalized line: [`line_key`] of its [`mask`]ed form. Learning
+/// ([`learn`], the persisted `mail_boilerplate` sets), recurrence and label lookup ([`Labels`])
+/// all go through it, for mail and RSS.
+pub fn masked_key(normalized: &str) -> u64 {
+    line_key(&mask(normalized))
+}
+
+/// How many messages of one sender contained each normalized line, keyed by [`masked_key`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LineSet {
     counts: HashMap<u64, u32>,
@@ -60,7 +153,10 @@ impl LineSet {
     }
 
     pub fn count(&self, normalized: &str) -> u32 {
-        self.counts.get(&line_key(normalized)).copied().unwrap_or(0)
+        self.counts
+            .get(&masked_key(normalized))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -92,7 +188,7 @@ pub(crate) fn fence_mask(lines: &[&str]) -> Vec<bool> {
 pub fn learn(set: &mut LineSet, body: &str) {
     let mut seen = HashSet::new();
     for n in body.lines().filter_map(normalize_line) {
-        let k = line_key(&n);
+        let k = masked_key(&n);
         if seen.insert(k) {
             *set.counts.entry(k).or_insert(0) += 1;
         }
@@ -168,14 +264,55 @@ pub const RSS_MIN_POSTS: u32 = 3;
 /// …and in at least this percentage of the publication's learned posts.
 pub const RSS_MIN_PERCENT: u32 = 30;
 
-/// One publication's removal labels as [`line_key`] sets. Precedence per normalized line:
+/// One publication's removal labels as [`masked_key`] sets. Precedence per masked key:
 /// **Keep** (never stripped, never folded; vetoes a Delete label and recurrence) > **Delete**
 /// (boilerplate in an anchored head/tail run: stripped outright) > **recurrence** (mail:
-/// stripped, RSS: folded). Mid-body lines are never touched, whatever their tier.
+/// stripped, RSS: folded). Mid-body lines are never touched, whatever their tier. Because the key
+/// is masked, a Delete recorded on a dated header applies to the same header with another date
+/// (anchored runs only), and a Keep on either date wins (plan
+/// `abstract-removal-confidence-deletion` Decision 6).
+///
+/// Build it from the stored label lines with [`Labels::from_lines`] (never from the stored
+/// exact `line_key` column); ask [`Labels::is_kept`] / [`Labels::is_deleted`] about a body line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Labels {
     pub keep: HashSet<u64>,
     pub delete: HashSet<u64>,
+}
+
+impl Labels {
+    /// Keys the stored label lines (`removal_labels.line`, as `cv_state::PublicationLabels`
+    /// returns them) with [`masked_key`]. A line [`normalize_line`] rejects has no key and is
+    /// skipped.
+    pub fn from_lines<'a>(
+        keep: impl IntoIterator<Item = &'a str>,
+        delete: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let keys = |v: &mut dyn Iterator<Item = &'a str>| -> HashSet<u64> {
+            v.filter_map(normalize_line)
+                .map(|n| masked_key(&n))
+                .collect()
+        };
+        Self {
+            keep: keys(&mut keep.into_iter()),
+            delete: keys(&mut delete.into_iter()),
+        }
+    }
+
+    /// The masked key of a raw body `line`; `None` when [`normalize_line`] rejects it.
+    fn key_of(line: &str) -> Option<u64> {
+        normalize_line(line).map(|n| masked_key(&n))
+    }
+
+    /// Whether the raw body `line`'s masked key has a Keep label.
+    pub fn is_kept(&self, line: &str) -> bool {
+        Self::key_of(line).is_some_and(|k| self.keep.contains(&k))
+    }
+
+    /// Whether the raw body `line`'s masked key has a Delete label and no Keep label (Keep wins).
+    pub fn is_deleted(&self, line: &str) -> bool {
+        Self::key_of(line).is_some_and(|k| self.delete.contains(&k) && !self.keep.contains(&k))
+    }
 }
 
 /// The source kind deciding the recurrence tier.
@@ -252,7 +389,7 @@ pub fn plan(
             let Some(n) = normalize_line(l) else {
                 return Kind::Neutral;
             };
-            let k = line_key(&n);
+            let k = masked_key(&n);
             let deleted = labels.delete.contains(&k);
             let recurs = recur.recurs(set.counts.get(&k).copied().unwrap_or(0));
             if labels.keep.contains(&k) {
@@ -492,11 +629,58 @@ mod tests {
     // ---- tiers (plan intake-removals-sources-rescan WP-5) ----
 
     fn labels(keep: &[&str], delete: &[&str]) -> Labels {
-        let k = |v: &[&str]| v.iter().map(|l| line_key(l)).collect();
-        Labels {
-            keep: k(keep),
-            delete: k(delete),
-        }
+        Labels::from_lines(keep.iter().copied(), delete.iter().copied())
+    }
+
+    #[test]
+    fn mask_matches_the_simulation() {
+        assert_eq!(
+            mask("Example News AM: Monday, Nov 3 2025"),
+            "Example News AM: \u{2}, \u{2} \u{1} \u{1}"
+        );
+        assert_eq!(
+            mask("see https://x.io/p/12345?a=7 MAY may Jan5 Sept_ Sunday"),
+            "see https://x.io/p/\u{1}?a=\u{1} \u{2} \u{2} Jan\u{1} Sept_ \u{2}"
+        );
+        assert_eq!(mask("Monsoon march-on"), "Monsoon \u{2}-on");
+        assert_eq!(masked_key("Issue 12"), masked_key("Issue 9876"));
+        assert_ne!(line_key("Issue 12"), line_key("Issue 9876"));
+        // Masking never makes a normalized line keyless: the length gate is normalize_line's.
+        assert_eq!(normalize_line("12 3").as_deref(), Some("12 3"));
+    }
+
+    #[test]
+    fn headers_differing_only_by_date_are_both_stripped() {
+        let a = "The Daily Brief for Monday, Nov 3 2025\nStory alpha one here\nStory alpha two here\nStory alpha three";
+        let b = "The Daily Brief for Friday, Dec 12 2025\nStory beta one here\nStory beta two here\nStory beta three";
+        let s = set_of(&[a, b]);
+        assert!(strip_tiered(a, &s, &Labels::default()).starts_with("Story alpha one"));
+        assert!(strip_tiered(b, &s, &Labels::default()).starts_with("Story beta one"));
+    }
+
+    #[test]
+    fn exact_labels_still_apply_and_keep_beats_a_masked_delete() {
+        let body = "Edition of 3 Nov 2025\nBody a line here\nBody b line here\nBody c line here\nBody d line here";
+        let other = "Edition of 12 Dec 2025\nBody a line here\nBody b line here\nBody c line here\nBody d line here";
+        // A Delete recorded on another date's header strips this one; a Keep on the exact line vetoes.
+        let l = labels(&[], &["Edition of 12 Dec 2025"]);
+        assert!(strip_tiered(body, &LineSet::new(), &l).starts_with("Body a line here"));
+        assert!(l.is_deleted(body.lines().next().unwrap()) && !l.is_kept(other));
+        let l = labels(&["Edition of 3 Nov 2025"], &["Edition of 3 Nov 2025"]);
+        assert!(strip_tiered(body, &LineSet::new(), &l).starts_with("Edition of 3 Nov"));
+        let l = labels(&["Edition of 3 Nov 2025"], &["Edition of 12 Dec 2025"]);
+        assert!(l.is_kept("Edition  of 1 Jan 2020") && !l.is_deleted("Edition of 1 Jan 2020"));
+        assert!(strip_tiered(body, &LineSet::new(), &l).starts_with("Edition of 3 Nov"));
+        // A Keep beats learned recurrence on the masked key too.
+        let s = set_of(&[body, other]);
+        assert!(strip_tiered(body, &s, &l).starts_with("Edition of 3 Nov"));
+    }
+
+    #[test]
+    fn masked_delete_is_ignored_outside_an_anchored_run() {
+        let body = "Body a line here\nBody b line here\nBody c line here\nRecap for 4 Mar 2024\nBody d line here\nBody e line here\nBody f line here";
+        let l = labels(&[], &["Recap for 9 Apr 2023"]);
+        assert_eq!(strip_tiered(body, &LineSet::new(), &l), body);
     }
 
     const BODY: &str = "Header chrome line\nStory line one here\nStory line two here\nStory line three here\nStory line four here\nSigned off by staff\nFooter one recurring\nFooter two recurring";

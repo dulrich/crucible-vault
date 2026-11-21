@@ -252,6 +252,14 @@ CREATE TABLE removal_labels (
 );
 CREATE INDEX removal_labels_pub_key ON removal_labels(publication, line_key, verdict);
 ",
+    // v21 (plan abstract-removal-confidence-deletion WP-4): learned boilerplate lines are keyed by
+    // the date-masked `cv_ingest::boilerplate::masked_key`, so the sets learned under the exact key
+    // are dropped; seen messages are never learned twice, so the seen list goes too and the next
+    // `intake_reconcile` re-seeds both. `removal_labels` is kept (looked up by its `line`).
+    r"
+DELETE FROM mail_boilerplate;
+DELETE FROM mail_boilerplate_seen;
+",
 ];
 
 /// Highest schema version this build knows.

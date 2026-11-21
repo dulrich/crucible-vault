@@ -1,6 +1,6 @@
 //! Per-sender learned newsletter boilerplate (plan `round-10-feedback-todos` WP-2, migration
 //! v13): for each newsletter `source_key`, how many learned messages contained each normalized
-//! line (keyed by `cv_ingest::boilerplate::line_key`), plus the Message-IDs already learned so a
+//! line (keyed by `cv_ingest::boilerplate::masked_key`), plus the Message-IDs already learned so a
 //! message counts once. The caller supplies the line keys; this crate stays free of the
 //! normalization rules.
 

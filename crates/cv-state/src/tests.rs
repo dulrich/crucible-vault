@@ -352,7 +352,7 @@ fn v19_database_migrates_to_v20_with_removal_labels() {
     c.execute_batch(migrate::MIGRATIONS[0]).unwrap();
     c.execute_batch(migrate::MIGRATIONS[1]).unwrap();
     c.pragma_update(None, "user_version", 19).unwrap();
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 20);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::latest_version());
     let n: i64 = c
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('removal_labels', 'removal_labels_pub_key')",
@@ -365,7 +365,7 @@ fn v19_database_migrates_to_v20_with_removal_labels() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("state.db");
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 20);
+    assert_eq!(s.schema_version().unwrap(), 21);
     let row = |verdict, line: &str| crate::RemovalLabel {
         note_id: 7,
         publication: "pub".into(),
@@ -400,6 +400,59 @@ fn v19_database_migrates_to_v20_with_removal_labels() {
     assert_eq!(
         StateReader::open(&p).unwrap().removal_labels().unwrap(),
         rows
+    );
+}
+
+/// Plan abstract-removal-confidence-deletion WP-4: v21 empties both learned boilerplate tables
+/// (re-seeded under the masked key) and keeps every removal label; a fresh database lands on v21.
+#[test]
+fn v20_database_migrates_to_v21_clearing_learned_sets_and_keeping_labels() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(migrate::BASELINE).unwrap();
+    for m in &migrate::MIGRATIONS[..3] {
+        c.execute_batch(m).unwrap();
+    }
+    c.pragma_update(None, "user_version", 20).unwrap();
+    c.execute_batch(
+        "INSERT INTO mail_boilerplate (source_key, line_key, count) VALUES ('p', 1, 2), ('p', 2, 3);
+         INSERT INTO mail_boilerplate_seen (source_key, message_id) VALUES ('p', 'm1'), ('p', 'm2');
+         INSERT INTO removal_labels (note_id, publication, kind, verdict, origin, line, line_key, at_ms)
+             VALUES (1, 'p', '', 'keep', 'fold', 'Edition of 3 Nov', 9, 5),
+                    (1, 'p', '', 'delete', 'fold', 'Read online', 8, 5);",
+    )
+    .unwrap();
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 21);
+    let n = |t: &str| -> i64 {
+        c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!((n("mail_boilerplate"), n("mail_boilerplate_seen")), (0, 0));
+    assert_eq!(n("removal_labels"), 2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = StateDb::open(&dir.path().join("state.db"), 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 21);
+    assert_eq!(migrate::latest_version(), 21);
+    let row = |verdict, line: &str| crate::RemovalLabel {
+        note_id: 1,
+        publication: "p".into(),
+        kind: String::new(),
+        verdict,
+        origin: cv_protocol::RemovalOrigin::Fold,
+        line: line.into(),
+        line_key: 1,
+        at_ms: 5,
+    };
+    s.insert_removal_labels(&[
+        row(cv_protocol::RemovalVerdict::Delete, "b line"),
+        row(cv_protocol::RemovalVerdict::Delete, "b line"),
+        row(cv_protocol::RemovalVerdict::Keep, "a line"),
+    ])
+    .unwrap();
+    let l = s.publication_labels("p").unwrap();
+    assert_eq!(
+        (l.keep, l.delete),
+        (vec!["a line".to_owned()], vec!["b line".to_owned()])
     );
 }
 
