@@ -830,3 +830,94 @@ async fn miss_write_restores_a_legacy_clip_heading() {
     );
     assert!(t.contains("\nenrich-miss: 1\n"), "{t}");
 }
+
+// ---- plan abstract-removal-confidence-deletion WP-3: the deletion tier ---------------------------
+
+fn tier_params(extra: &str) -> Params {
+    parse(&extra.parse::<toml::Table>().unwrap()).unwrap()
+}
+
+#[test]
+fn delete_confidence_parses_in_range_and_refuses_anything_else() {
+    assert!(tier_params("delete_confidence = 0.9").delete_confidence > 0.89);
+    assert!(tier_params("delete_confidence = 1").delete_confidence > 0.99);
+    assert!(tier_params("").delete_confidence.abs() < f64::EPSILON);
+    for bad in [
+        "delete_confidence = 2.0",
+        "delete_confidence = -0.1",
+        "delete_confidence = \"high\"",
+        "delete_confidence = nan",
+    ] {
+        let e = parse(&bad.parse::<toml::Table>().unwrap()).unwrap_err();
+        assert!(
+            e.contains("`delete_confidence`") && e.contains("0.0–1.0"),
+            "{bad}: {e}"
+        );
+    }
+}
+
+/// A mail note whose body opens with the CTA, so its derived description changes on deletion.
+fn mail_note(description: Option<&str>) -> String {
+    let para = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ";
+    let body = format!(
+        "\n{CTA}\n\n{}\n\n{}\n",
+        para.repeat(15).trim(),
+        para.repeat(5).trim()
+    );
+    let derived = super::mail::mail_description(&body);
+    let d = description.map_or(derived, str::to_owned);
+    format!(
+        "---\ntitle: M\nvia: email\npublication: Test Letter\ndescription: \"{d}\"\n---\n{body}"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sure_span_is_deleted_and_a_derived_mail_description_recomputed() {
+    let (base, _mock) = fake(200, &answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("m.md", mail_note(None));
+    e.fx.write("a.md", mail_note(Some("Hand-written summary.")));
+    let p = || tier_params("delete_confidence = 0.9");
+    let o = exec(&e, "m.md", Map::new(), p()).await.unwrap();
+    assert_eq!(
+        (var(&o, "lines_deleted"), var(&o, "spans_deleted")),
+        (json!(1), json!(1))
+    );
+    assert_eq!(var(&o, "lines_folded"), json!(0));
+    let t = read(&e, "m.md");
+    assert!(!t.contains(CTA), "deleted text is not kept anywhere: {t}");
+    assert!(!t.contains("[!removed]"), "{t}");
+    assert!(t.contains("description: alpha beta"), "{t}");
+    assert!(t.contains("\nenriched: 20"), "{t}");
+    exec(&e, "a.md", Map::new(), p()).await.unwrap();
+    let t = read(&e, "a.md");
+    assert!(!t.contains(CTA), "{t}");
+    assert!(t.contains("description: \"Hand-written summary.\""), "{t}");
+}
+
+/// The miss-rule interplay: a forced re-run finds the deleted lines gone (anchors drop), but the
+/// note is stamped, so it is no miss and nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forced_rerun_after_a_deletion_is_idempotent_and_no_miss() {
+    let (base, _mock) = fake(200, &answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("n.md", long_note());
+    let p = || tier_params("delete_confidence = 0.9\nforce = true");
+    let o = exec(&e, "n.md", Map::new(), p()).await.unwrap();
+    assert_eq!(var(&o, "lines_deleted"), json!(1));
+    let first = read(&e, "n.md");
+    assert!(!first.contains(CTA), "{first}");
+    let o = exec(&e, "n.md", Map::new(), p()).await.unwrap();
+    assert_eq!(var(&o, "miss"), Value::Null);
+    assert_eq!(var(&o, "enriched"), json!(true));
+    assert_eq!(
+        (var(&o, "lines_deleted"), var(&o, "anchors_dropped")),
+        (json!(0), json!(1))
+    );
+    assert_eq!(read(&e, "n.md"), first, "second run writes nothing");
+    // With the key absent the same note folds the CTA, as before this WP.
+    e.fx.write("f.md", long_note());
+    let o = exec(&e, "f.md", Map::new(), params(false)).await.unwrap();
+    assert_eq!(var(&o, "lines_deleted"), json!(0));
+    assert!(read(&e, "f.md").contains(&format!("> {CTA}")));
+}

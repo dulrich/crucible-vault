@@ -22,10 +22,12 @@ mod tests;
 use body::strip_generated;
 pub use body::{has_legacy_top, strip_structure, strip_top};
 pub use model::{
-    BannerRef, Chapter, EnrichEdit, EnrichError, EnrichOpts, EnrichOutput, EnrichReport, Span,
-    SpanKind, parse, squeeze,
+    BannerRef, Chapter, Deletion, EnrichEdit, EnrichError, EnrichOpts, EnrichOutput, EnrichReport,
+    Span, SpanKind, deletes, parse, squeeze,
 };
-use pass::{assemble, banners_and_cap, plan_groups, plan_headings, render_fold, resolve_fold};
+use pass::{
+    assemble, banners_and_cap, plan_deletion, plan_groups, plan_headings, render_fold, resolve_fold,
+};
 
 // The fold layout and review operations live in [`crate::fold`]; re-exported so every
 // `cv_ingest::enrich::…` path keeps resolving.
@@ -53,6 +55,19 @@ pub fn enrich(
     banners: &[BannerRef],
     opts: EnrichOpts,
 ) -> EnrichEdit {
+    enrich_with(body, output, banners, opts, Deletion::default())
+}
+
+/// [`enrich`] with the deletion tier (plan abstract-removal-confidence-deletion WP-3): a fold
+/// run [`pass::plan_deletion`] selects under `del` leaves the body with no fold copy and is
+/// counted in `lines_deleted` / `spans_deleted`. `del.threshold == 0` is exactly [`enrich`].
+pub fn enrich_with(
+    body: &str,
+    output: &EnrichOutput,
+    banners: &[BannerRef],
+    opts: EnrichOpts,
+    del: Deletion<'_>,
+) -> EnrichEdit {
     let st = strip_generated(body);
     let lines = &st.lines;
     let sq: Vec<String> = lines.iter().map(|l| squeeze(l)).collect();
@@ -63,21 +78,24 @@ pub fn enrich(
         .iter()
         .map(|l| squeeze(crate::fold::unquote(l)))
         .collect();
-    let (spans, mut kinds, resolved) = resolve_fold(output, &sq, &prior);
+    let mut sure = pass::Sure::new();
+    let (spans, mut kinds, resolved) = resolve_fold(output, &sq, &prior, del.threshold, &mut sure);
     rep.merge(&resolved);
-    let (fold, capped) = banners_and_cap(spans, &mut kinds, banners, &sq);
+    let (fold, capped) = banners_and_cap(spans, &mut kinds, &mut sure, banners, &sq);
     rep.merge(&capped);
+    let deleted = plan_deletion(lines, &sq, &fold, &sure, &st.prior_meta, |l| {
+        del.labels.is_some_and(|lb| lb.is_kept(l))
+    });
     let plan = plan_headings(output, opts, lines, &sq, &fold);
     rep.merge(&plan.report);
-    let (fold_block, fold_rep) = render_fold(
-        &plan_groups(lines, &sq, &fold, &kinds),
-        &st.prior_meta,
-        &st.prior_fold,
-        lines,
-    );
+    let (groups, spans_deleted) = plan_groups(lines, &sq, &fold, &kinds, &deleted);
+    let (fold_block, fold_rep) = render_fold(&groups, &st.prior_meta, &st.prior_fold, lines);
     rep.merge(&fold_rep);
+    rep.lines_deleted = deleted.len();
+    rep.spans_deleted = spans_deleted;
+    rep.lines_folded -= deleted.len();
 
-    if !st.had_generated && fold_block.is_empty() && plan.inserts.is_empty() {
+    if !st.had_generated && fold_block.is_empty() && plan.inserts.is_empty() && deleted.is_empty() {
         return EnrichEdit {
             text: body.to_owned(),
             report: rep,
@@ -100,5 +118,7 @@ impl EnrichReport {
         self.banners_folded += other.banners_folded;
         self.fold_refused_over_half |= other.fold_refused_over_half;
         self.headings_inserted += other.headings_inserted;
+        self.lines_deleted += other.lines_deleted;
+        self.spans_deleted += other.spans_deleted;
     }
 }

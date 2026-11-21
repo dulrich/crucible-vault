@@ -11,7 +11,7 @@ mod trim;
 
 pub(crate) use layout::{FOLD_HEADER, closing, quote, unquote, write_fold};
 pub use layout::{FOLD_KIND, FOLD_MARKER};
-pub(crate) use meta::{Anchor, anchor_of, parse_meta, render_meta};
+pub(crate) use meta::{Anchor, anchor_of, meta_after_text, parse_meta, render_meta};
 pub use resolve::{
     FoldError, FoldGroup, GroupTarget, Placement, Resolution, ResolvedGroup, Verdict, fold_groups,
     removed_spans, resolve_groups,

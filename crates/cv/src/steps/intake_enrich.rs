@@ -2,8 +2,9 @@
 //! `docs/spikes/auto-intake-llm/FINDINGS.md`, decision D29): one LLM structure + cleanup pass over
 //! an intake note, applied by `cv_ingest::enrich` — chapter headings in heading-less bodies and
 //! **one folded `[!removed]-` callout** for what the cleanup marks. The model never rewrites text
-//! and nothing is deleted. No top block is written (plan abstract-removal-confidence-deletion
-//! WP-2, Decision 1); every write this step makes removes a legacy `[!abstract]` one.
+//! and, unless `delete_confidence` is set, nothing is deleted. No top block is written (plan
+//! abstract-removal-confidence-deletion WP-2, Decision 1); every write this step makes removes a
+//! legacy `[!abstract]` one.
 //!
 //! | key | values | default |
 //! |---|---|---|
@@ -11,6 +12,15 @@
 //! | `force` | re-run on a note that already carries `enriched`; a job param `force` wins | `false` |
 //! | `agent` | the `agents.toml` id returning the JSON answer | `"intake-enrich"` |
 //! | `limit` | backfill only: notes enqueued per run, newest first (> 0) | `20` |
+//! | `delete_confidence` | deletion threshold, a number in 0.0–1.0 (out of range, NaN or a non-number is a parse error); `0` = off | `0` |
+//!
+//! **Deletion tier** (plan abstract-removal-confidence-deletion WP-3, Decision 3; ships off): with
+//! `delete_confidence` > 0, a fold run claimed only by model spans whose valid confidence is at or
+//! over it ([`enrich::deletes`]) is removed from the body with no fold copy
+//! ([`enrich::enrich_with`]); a missing or malformed confidence, `content_ends_after`, banners,
+//! code fences and lines Keep-labelled for the note's `publication` (masked key) always fold. When
+//! lines are deleted from a mail note, a daemon-derived `description` is recomputed; an authored
+//! one is left alone. Labels are read only when deletion is on.
 //!
 //! **Note scope**, in order: read the note and its CAS hash; a non-empty `enriched` frontmatter
 //! value skips (no model call) unless forced; call the agent through the `agent` step's provider
@@ -28,7 +38,11 @@
 //! anchors, or resolved at least one (a span whose anchors are lines an earlier run already folded
 //! counts, `anchors_already_folded`), stamps. A miss stamps nothing and changes the body only by
 //! removing a legacy top block ([`enrich::strip_top`]); `enrich-miss` = previous count + 1 (absent
-//! or non-numeric reads as 0) is written, with the pre-call hash. Short notes are never a miss. An
+//! or non-numeric reads as 0) is written, with the pre-call hash. Short notes are never a miss. A
+//! deleted span resolved, so it counts as resolved. With deletion on, a run on a note that already
+//! carries `enriched` (a forced re-run) is never a miss: the lines an earlier run deleted are gone,
+//! their anchors drop, and the stamp is the evidence of the earlier success (no deleted text is
+//! stored to recognise them). An
 //! unparseable answer or a failed call stays a step failure with nothing written.
 //! The backfill holds back notes whose `enrich-miss` is at or over [`ENRICH_MISS_CAP`] (counted
 //! as `miss_capped`; `refine_pending` picks are left alone); `force` runs a note regardless.
@@ -63,14 +77,15 @@
 //!
 //! Outcome vars: `skipped` (`"already enriched"`), `enriched`, `anchors_resolved`,
 //! `anchors_dropped`, `anchors_already_folded`, `lines_folded`, `banners_folded`, `fold_refused_over_half`,
-//! `headings_inserted`, `spans_folded`, `words`; on a miss `enriched: false`, `miss: true`,
+//! `headings_inserted`, `spans_folded`, `lines_deleted`, `spans_deleted` (counts only), `words`;
+//! on a miss `enriched: false`, `miss: true`,
 //! `enrich_miss`; backfill: `candidates`, `enqueued`, `enqueue_failed`, `miss_capped`; strip-top:
 //! `candidates` (notes scanned), `stripped`, `heading_restored`, `strip_conflict`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_ingest::enrich::{self, BannerRef, EnrichOpts, EnrichReport};
+use cv_ingest::enrich::{self, BannerRef, Deletion, EnrichOpts, EnrichReport};
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_providers::ProviderManager;
 use serde::Serialize;
@@ -113,6 +128,26 @@ pub(crate) struct Params {
     force: bool,
     agent: String,
     limit: usize,
+    /// The deletion threshold (0 = off).
+    pub(crate) delete_confidence: f64,
+}
+
+/// The `delete_confidence` key: absent = 0 (off); an integer or float in 0.0–1.0, else an error
+/// naming the key and the range (never clamped).
+fn get_delete_confidence(t: &toml::Table) -> Result<f64, String> {
+    let err = || "intake_enrich step: `delete_confidence` must be a number in 0.0–1.0".to_owned();
+    #[allow(clippy::cast_precision_loss)]
+    let v = match t.get("delete_confidence") {
+        None => return Ok(0.0),
+        Some(toml::Value::Float(f)) => *f,
+        Some(toml::Value::Integer(n)) => *n as f64,
+        Some(_) => return Err(err()),
+    };
+    if v.is_finite() && (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(err())
+    }
 }
 
 pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
@@ -143,6 +178,7 @@ pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
         force: get_bool(t, "force")?.unwrap_or(false),
         agent: agent.trim().to_owned(),
         limit,
+        delete_confidence: get_delete_confidence(t)?,
     })
 }
 
@@ -189,6 +225,8 @@ struct Vars {
     banners_folded: usize,
     fold_refused_over_half: bool,
     headings_inserted: usize,
+    lines_deleted: usize,
+    spans_deleted: usize,
 }
 
 impl Vars {
@@ -207,6 +245,8 @@ impl Vars {
             banners_folded: r.banners_folded,
             fold_refused_over_half: r.fold_refused_over_half,
             headings_inserted: r.headings_inserted,
+            lines_deleted: r.lines_deleted,
+            spans_deleted: r.spans_deleted,
         }
     }
 }
@@ -286,17 +326,36 @@ pub(crate) fn run_note(
         ))
     })?;
     let banners = banner_refs(ctx, &path, body);
-    let edit = enrich::enrich(
+    // Labels are looked up only when deletion is on: with it off nothing here touches state.db.
+    let labels = if p.delete_confidence > 0.0 {
+        match source.get_str("publication") {
+            Some(publ) if !publ.trim().is_empty() => {
+                Some(super::reconcile_boilerplate::load_labels(ctx, publ.trim())?)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let edit = enrich::enrich_with(
         body,
         &parsed,
         &banners,
         EnrichOpts {
             headings: words >= SHORT_WORDS,
         },
+        Deletion {
+            threshold: p.delete_confidence,
+            labels: labels.as_ref(),
+        },
     );
     let fm_err =
         |e: cv_note::FmError| StepError::failed(format!("intake_enrich: frontmatter: {e}"));
-    if is_miss(words, &edit.report) {
+    // Miss rule with deletion on: a forced re-run of a stamped note finds the lines an earlier
+    // run deleted gone, so their anchors drop. The `enriched` stamp is the evidence that pass
+    // succeeded (no deleted text is kept to recognise them), so it is not a miss then.
+    let redone = p.delete_confidence > 0.0 && already_enriched(&orig);
+    if is_miss(words, &edit.report) && !redone {
         // Nothing usable came back: keep the body (minus a legacy top block, invariant (a)) and
         // the unstamped state, count the miss.
         let mut doc = match enrich::strip_top(body) {
@@ -316,6 +375,9 @@ pub(crate) fn run_note(
         return Ok(out);
     }
     let mut doc = reattach(&text, body, &edit.text);
+    if edit.report.lines_deleted > 0 {
+        redescribe_mail(&mut doc, body).map_err(fm_err)?;
+    }
     let date = super::materialize::now().format("%Y-%m-%d").to_string();
     super::enrich_stamp::set(&mut doc, date, model_ref).map_err(fm_err)?;
     let new = doc.into_text();
@@ -325,6 +387,27 @@ pub(crate) fn run_note(
     out.push_output(path);
     out.set_vars(&Vars::from_report(words, &edit.report));
     Ok(out)
+}
+
+/// After a deletion from a mail note (`via: email`): its `description` is recomputed from the new
+/// body the way capture and the boilerplate strip derive it ([`super::mail::mail_description`])
+/// when it is daemon-derived — equal to that derivation of the pre-edit body `old_body`; any other
+/// (authored) `description` is left alone.
+fn redescribe_mail(doc: &mut FrontmatterDoc, old_body: &str) -> Result<(), cv_note::FmError> {
+    let mail = doc
+        .get_str("via")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("email"));
+    let Some(cur) = doc.get_str("description") else {
+        return Ok(());
+    };
+    if !mail || cur != super::mail::mail_description(old_body) {
+        return Ok(());
+    }
+    let fresh = super::mail::mail_description(doc.body());
+    if fresh != cur {
+        doc.set("description", &JsValue::Str(fresh))?;
+    }
+    Ok(())
 }
 
 /// The note `text` with its body (`body`, the [`FrontmatterDoc::body`] of `text`) replaced by `new_body`: the frontmatter block is kept byte-exact.

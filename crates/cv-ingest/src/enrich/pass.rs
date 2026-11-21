@@ -16,6 +16,11 @@
 //!   the claim-quote anchors are gone; a legacy one is removed by the re-run's strip).
 //! - **Inserted headings** are preceded by a `%% cv-enrich heading %%` marker line and followed by
 //!   one blank line; a re-run strips marker + heading + blank before deciding "has headings".
+//! - **Deletion tier** (plan abstract-removal-confidence-deletion WP-3, Decision 3): a fold run
+//!   whose every line only model spans claim, each choosing deletion ([`deletes`]), outside code
+//!   fences, without a Keep label and with no line whose squeezed text equals a prior fold
+//!   group's `after` anchor text, leaves the body with no fold copy ([`plan_deletion`]); anything
+//!   else folds as before. Deleted lines count toward the half-body guard.
 
 use std::collections::BTreeSet;
 
@@ -24,21 +29,29 @@ use cv_text::sections::heading_text;
 
 use super::body::link_safe;
 use super::{
-    BannerRef, EnrichOpts, EnrichOutput, EnrichReport, MARK_HEADING, MARK_OPEN, SpanKind, squeeze,
+    BannerRef, EnrichOpts, EnrichOutput, EnrichReport, MARK_HEADING, MARK_OPEN, SpanKind, deletes,
+    squeeze,
 };
 use crate::fold::{Anchor, FOLD_HEADER, anchor_of, closing, quote, render_meta, write_fold};
 
 /// Folded line index → the kind of the span that claimed it first.
 type Kinds = std::collections::BTreeMap<usize, SpanKind>;
 
+/// Claimed line index → whether every claim on it chose deletion ([`deletes`]); a
+/// `content_ends_after` or banner claim is always `false`.
+pub(super) type Sure = std::collections::BTreeMap<usize, bool>;
+
 /// Phase 1: the line indices the model's spans and `content_ends_after` fold, and each folded
 /// line's span kind (the first span claiming a line wins). A span that does not resolve against
 /// the body but whose both anchors are lines of the prior fold (`prior`, squeezed and unquoted)
 /// is counted as `anchors_already_folded`, not dropped: an earlier run already applied it.
+/// `sure` records, per claimed line, whether all its claims chose deletion under `threshold`.
 pub(super) fn resolve_fold(
     output: &EnrichOutput,
     sq: &[String],
     prior: &[String],
+    threshold: f64,
+    sure: &mut Sure,
 ) -> (BTreeSet<usize>, Kinds, EnrichReport) {
     let mut rep = EnrichReport::default();
     let mut fold: BTreeSet<usize> = BTreeSet::new();
@@ -61,8 +74,10 @@ pub(super) fn resolve_fold(
             Some((s, e)) => {
                 rep.anchors_resolved += 1;
                 fold.extend(s..=e);
+                let del = deletes(span.confidence, threshold);
                 for i in s..=e {
                     kinds.entry(i).or_insert_with(|| span.kind.clone());
+                    *sure.entry(i).or_insert(true) &= del;
                 }
             }
             None if !a.is_empty() && prior.contains(&a) && prior.contains(&b) => {
@@ -89,6 +104,7 @@ pub(super) fn resolve_fold(
                     fold.extend(f..=l);
                     for i in f..=l {
                         kinds.entry(i).or_insert(SpanKind::Footer);
+                        sure.insert(i, false);
                     }
                 }
             }
@@ -99,10 +115,12 @@ pub(super) fn resolve_fold(
 }
 
 /// Phase 2: add the banner lines to `fold`, then drop the whole fold when it would take more than
-/// half of the non-blank lines.
+/// half of the non-blank lines (`fold` holds the lines to delete as well, so the guard counts
+/// both and refuses both). Banner lines are never deleted (`sure` = `false`).
 pub(super) fn banners_and_cap(
     mut fold: BTreeSet<usize>,
     kinds: &mut Kinds,
+    sure: &mut Sure,
     banners: &[BannerRef],
     sq: &[String],
 ) -> (BTreeSet<usize>, EnrichReport) {
@@ -118,6 +136,7 @@ pub(super) fn banners_and_cap(
     fold.extend(banner_lines.iter().copied());
     for &i in &banner_lines {
         kinds.entry(i).or_insert(SpanKind::Banner);
+        sure.insert(i, false);
     }
 
     let non_blank = sq.iter().filter(|s| !s.is_empty()).count();
@@ -129,6 +148,50 @@ pub(super) fn banners_and_cap(
     rep.lines_folded = fold.len();
     rep.banners_folded = banner_lines.iter().filter(|i| fold.contains(i)).count();
     (fold, rep)
+}
+
+/// Phase 2b: the subset of `fold` deleted instead of folded. The unit is a maximal run of `fold`
+/// (exactly a fold group of [`plan_groups`]): a run is deleted only when every line in it is
+/// `sure`, outside a code fence, not Keep-labelled (`kept`), and its squeezed text (`sq`) equals
+/// no prior group's `after` anchor text (`prior_meta`, any occurrence, earlier or later: deleting
+/// it would orphan or retarget that group for good, where a fold stays reversible through Keep);
+/// otherwise the whole run folds. The groups that stay are cut from the same runs.
+pub(super) fn plan_deletion(
+    lines: &[String],
+    sq: &[String],
+    fold: &BTreeSet<usize>,
+    sure: &Sure,
+    prior_meta: &[String],
+    kept: impl Fn(&str) -> bool,
+) -> BTreeSet<usize> {
+    let fence = blocks::fenced_lines(lines);
+    let anchors: BTreeSet<String> = prior_meta
+        .iter()
+        .filter_map(|m| crate::fold::meta_after_text(m))
+        .map(|t| squeeze(&t))
+        .collect();
+    let ok = |i: usize| {
+        sure.get(&i).copied().unwrap_or(false)
+            && !fence[i]
+            && !kept(&lines[i])
+            && !anchors.contains(&sq[i])
+    };
+    let mut out = BTreeSet::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !fold.contains(&i) {
+            i += 1;
+            continue;
+        }
+        let s = i;
+        while i < lines.len() && fold.contains(&i) {
+            i += 1;
+        }
+        if (s..i).all(ok) {
+            out.extend(s..i);
+        }
+    }
+    out
 }
 
 /// Phase 3's piece: the chapter headings to insert (line index, title).
@@ -197,7 +260,9 @@ pub(super) fn plan_groups(
     sq: &[String],
     fold: &BTreeSet<usize>,
     kinds: &Kinds,
-) -> Vec<NewGroup> {
+    deleted: &BTreeSet<usize>,
+) -> (Vec<NewGroup>, usize) {
+    let mut n_deleted = 0;
     let blank = |k: usize| lines[k].trim().is_empty();
     let mut out: Vec<usize> = Vec::with_capacity(lines.len());
     let mut groups = Vec::new();
@@ -219,6 +284,11 @@ pub(super) fn plan_groups(
         if join {
             i += 1;
         }
+        // A deleted run leaves the body as its fold would, but no group (and no copy).
+        if deleted.contains(&s) {
+            n_deleted += 1;
+            continue;
+        }
         let anchor = anchor_of(&out, sq, |_| false, join);
         let kind = kinds
             .get(&s)
@@ -226,7 +296,7 @@ pub(super) fn plan_groups(
             .unwrap_or_else(|| SpanKind::Other(String::new()));
         groups.push(NewGroup { idx, kind, anchor });
     }
-    groups
+    (groups, n_deleted)
 }
 
 /// Phase 5: the trailing `> [!removed]-` fold block lines (empty when nothing is folded): prior

@@ -17,7 +17,7 @@ fn sp(kind: SpanKind, first: &str, last: &str) -> Span {
         kind,
         first_line: first.into(),
         last_line: last.into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     }
 }
 

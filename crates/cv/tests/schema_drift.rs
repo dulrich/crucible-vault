@@ -216,7 +216,7 @@ const STEPS: &[(&str, &str)] = &[
     ("intake_enrich", ""),
     (
         "intake_enrich",
-        "scope = \"strip-top\"\nlimit = 5\nforce = true\nagent = \"intake-enrich\"",
+        "scope = \"strip-top\"\nlimit = 5\nforce = true\nagent = \"intake-enrich\"\ndelete_confidence = 0.9",
     ),
     ("transcript_refine", ""),
     ("transcript_refine", "agent = \"transcript-refine\""),

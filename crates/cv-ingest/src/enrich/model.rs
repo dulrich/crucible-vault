@@ -71,7 +71,10 @@ pub struct Span {
     pub kind: SpanKind,
     pub first_line: String,
     pub last_line: String,
-    pub confidence: f64,
+    /// The model's confidence that the span is removable: `Some` only for a finite number in
+    /// 0.0–1.0; missing, non-numeric or out-of-range is `None` and the span always folds (plan
+    /// abstract-removal-confidence-deletion WP-3: no default reads as "sure").
+    pub confidence: Option<f64>,
 }
 
 /// The merged structure + cleanup answer (spike prompts; `scores` ignored).
@@ -111,6 +114,26 @@ pub struct EnrichReport {
     pub banners_folded: usize,
     pub fold_refused_over_half: bool,
     pub headings_inserted: usize,
+    /// Lines removed from the body without a fold copy (confidence tier; never in `lines_folded`).
+    pub lines_deleted: usize,
+    /// Disjoint groups of deleted lines.
+    pub spans_deleted: usize,
+}
+
+/// The deletion tier of [`enrich_with`](super::enrich_with): `threshold` 0 (the default) deletes
+/// nothing; `labels` (the note's publication's, if any) veto deletion of a Keep-labelled line.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Deletion<'a> {
+    pub threshold: f64,
+    pub labels: Option<&'a crate::boilerplate::Labels>,
+}
+
+/// The delete-or-fold decision of one model span: delete when deletion is on (`threshold > 0`) and
+/// the span's `score` is a valid confidence at or over it. The single seam a later scorer (e.g. a
+/// local classifier) supplies its score through; everything else about deletion stays in the pass.
+#[must_use]
+pub fn deletes(score: Option<f64>, threshold: f64) -> bool {
+    threshold > 0.0 && score.is_some_and(|c| c >= threshold)
 }
 
 /// The rendered note and its report.
@@ -159,7 +182,10 @@ pub fn parse(text: &str) -> Result<EnrichOutput, EnrichError> {
             kind: SpanKind::from_str(o.get("kind")?.as_str()?),
             first_line: o.get("first_line")?.as_str()?.to_owned(),
             last_line: o.get("last_line")?.as_str()?.to_owned(),
-            confidence: o.get("confidence").and_then(Value::as_f64).unwrap_or(1.0),
+            confidence: o
+                .get("confidence")
+                .and_then(Value::as_f64)
+                .filter(|c| c.is_finite() && (0.0..=1.0).contains(c)),
         })
     });
     Ok(out)

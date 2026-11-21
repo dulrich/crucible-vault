@@ -169,7 +169,7 @@ fn forced_rerun_keeps_prior_fold_and_adds_new() {
         kind: SpanKind::Cta,
         first_line: "Some analysts expect a plateau next year.".into(),
         last_line: "Some analysts expect a plateau next year.".into(),
-        confidence: 0.9,
+        confidence: Some(0.9),
     }];
     o2.content_ends_after = None;
     let e = enrich(&once, &o2, &[], opts());
@@ -239,7 +239,7 @@ fn unresolved_anchors_dropped_and_counted() {
         kind: SpanKind::Chrome,
         first_line: "This line does not exist".into(),
         last_line: "Nor this one".into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     });
     o.chapters.push(Chapter {
         title: "Ghost".into(),
@@ -263,7 +263,7 @@ fn last_line_must_follow_first_line() {
         kind: SpanKind::Chrome,
         first_line: "Start marker".into(),
         last_line: "End marker".into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     }];
     let e = enrich(body, &o, &[], opts());
     assert_eq!(e.report.anchors_dropped, 1);
@@ -277,7 +277,7 @@ fn overlapping_spans_merge() {
         kind: SpanKind::Sponsor,
         first_line: a.into(),
         last_line: b.into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     };
     o.spans = vec![
         sp("## Sponsor", "This issue is brought to you by Acme Gizmos."),
@@ -299,7 +299,7 @@ fn repeated_chrome_resolves_to_successive_occurrences() {
         kind: SpanKind::Chrome,
         first_line: "Error banner.".into(),
         last_line: "Reload page.".into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     };
     let mut o = EnrichOutput::default();
     o.spans = vec![sp.clone(), sp];
@@ -315,7 +315,7 @@ fn half_body_cap_refuses_fold_but_keeps_headings() {
         kind: SpanKind::Chrome,
         first_line: "Welcome to this week's letter about widgets.".into(),
         last_line: "Others argue demand will keep rising with new uses.".into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     }];
     let e = enrich(&note(), &o, &[], opts());
     assert!(e.report.fold_refused_over_half);
@@ -343,7 +343,7 @@ fn span_matching_generated_block_text_is_ignored() {
         kind: SpanKind::Chrome,
         first_line: "> [!removed]-".into(),
         last_line: "%% /cv-enrich %%".into(),
-        confidence: 1.0,
+        confidence: Some(1.0),
     }];
     o.content_ends_after = None;
     let e = enrich(&once, &o, &[], opts());
@@ -521,4 +521,383 @@ fn strip_structure_drops_the_top_block_and_inserted_headings_only() {
 fn banner_kind_round_trips_as_banner() {
     assert_eq!(SpanKind::Banner.as_str(), "banner");
     assert_eq!(SpanKind::from_str("banner"), SpanKind::Banner);
+}
+
+// ---- plan abstract-removal-confidence-deletion WP-3: confidence tiers ----------------------------
+
+const TIER: &str = "Opening paragraph about the river delta and its silt.
+
+Sponsored by Example Boats Ltd.
+Visit example boats for spring offers.
+
+The delta grows every year as the river slows down.
+Farmers plant along the newest banks each spring.
+
+Follow us on the usual networks.
+
+Fishermen report larger catches near the mouth.
+The town council meets about flooding in May.
+A new bridge is planned for the north channel.
+Tourists come for the birds in autumn.
+";
+
+const SPONSOR: (&str, &str) = (
+    "Sponsored by Example Boats Ltd.",
+    "Visit example boats for spring offers.",
+);
+const FOLLOW: &str = "Follow us on the usual networks.";
+
+fn ans(spans: &serde_json::Value) -> EnrichOutput {
+    parse(&serde_json::json!({ "spans": spans }).to_string()).unwrap()
+}
+
+fn span(first: &str, last: &str, conf: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"kind": "sponsor", "first_line": first, "last_line": last, "confidence": conf})
+}
+
+fn tiered(body: &str, o: &EnrichOutput, t: f64) -> EnrichEdit {
+    enrich_with(
+        body,
+        o,
+        &[],
+        opts(),
+        Deletion {
+            threshold: t,
+            labels: None,
+        },
+    )
+}
+
+/// The body part of an enriched text (before the fold block).
+fn body_part(t: &str) -> &str {
+    t.split(MARK_OPEN).next().unwrap().trim_end()
+}
+
+#[test]
+fn spans_at_and_over_the_threshold_are_deleted_under_it_folded() {
+    let o = ans(&serde_json::json!([
+        span(SPONSOR.0, SPONSOR.1, &serde_json::json!(0.8)),
+        span(FOLLOW, FOLLOW, &serde_json::json!(0.79)),
+    ]));
+    let e = tiered(TIER, &o, 0.8);
+    assert!(
+        !e.text.contains(SPONSOR.0) && !e.text.contains(SPONSOR.1),
+        "{}",
+        e.text
+    );
+    assert!(e.text.contains(&format!("> {FOLLOW}")), "{}", e.text);
+    assert_eq!(
+        (e.report.lines_deleted, e.report.spans_deleted),
+        (2, 1),
+        "{:?}",
+        e.report
+    );
+    assert_eq!((e.report.lines_folded, e.report.spans_folded), (1, 1));
+    // Over the threshold: both go, and nothing is folded at all.
+    let e = tiered(TIER, &o, 0.5);
+    assert_eq!((e.report.lines_deleted, e.report.spans_deleted), (3, 2));
+    assert!(
+        !e.text.contains("[!removed]") && !e.text.contains(FOLLOW),
+        "{}",
+        e.text
+    );
+    assert_eq!(e.report.anchors_resolved, 2);
+}
+
+#[test]
+fn missing_or_malformed_confidence_always_folds() {
+    for c in [
+        serde_json::json!("high"),
+        serde_json::json!(-0.2),
+        serde_json::json!(1.5),
+        serde_json::Value::Null,
+    ] {
+        let o = ans(&serde_json::json!([span(FOLLOW, FOLLOW, &c)]));
+        assert_eq!(o.spans[0].confidence, None, "{c}");
+        let e = tiered(TIER, &o, 0.01);
+        assert_eq!(e.report.lines_deleted, 0, "{c}");
+        assert!(e.text.contains(&format!("> {FOLLOW}")), "{c}");
+    }
+    let o = ans(&serde_json::json!([{"kind": "cta", "first_line": FOLLOW, "last_line": FOLLOW}]));
+    assert_eq!(o.spans[0].confidence, None);
+    assert_eq!(tiered(TIER, &o, 0.01).report.lines_deleted, 0);
+}
+
+#[test]
+fn overlap_deletes_only_when_every_claim_is_sure_and_footer_banner_fold() {
+    // A low-confidence span claims the sponsor's second line: the whole run folds.
+    let o = ans(&serde_json::json!([
+        span(SPONSOR.0, SPONSOR.1, &serde_json::json!(0.99)),
+        span(SPONSOR.1, SPONSOR.1, &serde_json::json!(0.2)),
+    ]));
+    let e = tiered(TIER, &o, 0.9);
+    assert_eq!(e.report.lines_deleted, 0);
+    assert!(e.text.contains(&format!("> {}", SPONSOR.0)), "{}", e.text);
+    // Both sure: deleted.
+    let o = ans(&serde_json::json!([
+        span(SPONSOR.0, SPONSOR.1, &serde_json::json!(0.99)),
+        span(SPONSOR.1, SPONSOR.1, &serde_json::json!(0.95)),
+    ]));
+    assert_eq!(tiered(TIER, &o, 0.9).report.lines_deleted, 2);
+    // `content_ends_after` (footer) and a banner claim fold even under a sure span.
+    let mut o = ans(&serde_json::json!([span(
+        "Tourists come for the birds in autumn.",
+        "Tourists come for the birds in autumn.",
+        &serde_json::json!(0.99)
+    )]));
+    o.content_ends_after = Some("A new bridge is planned for the north channel.".into());
+    let e = tiered(TIER, &o, 0.9);
+    assert_eq!(e.report.lines_deleted, 0);
+    assert!(e.text.contains("> Tourists come"), "{}", e.text);
+    let o = ans(&serde_json::json!([span(
+        FOLLOW,
+        FOLLOW,
+        &serde_json::json!(0.99)
+    )]));
+    let e = enrich_with(
+        TIER,
+        &o,
+        &[BannerRef(FOLLOW.into())],
+        opts(),
+        Deletion {
+            threshold: 0.9,
+            labels: None,
+        },
+    );
+    assert_eq!((e.report.lines_deleted, e.report.banners_folded), (0, 1));
+}
+
+#[test]
+fn threshold_zero_deletes_nothing_and_equals_enrich() {
+    let o = ans(&serde_json::json!([
+        span(SPONSOR.0, SPONSOR.1, &serde_json::json!(1.0)),
+        span(FOLLOW, FOLLOW, &serde_json::json!(0.99)),
+    ]));
+    let plain = enrich(TIER, &o, &[], opts());
+    let zero = tiered(TIER, &o, 0.0);
+    assert_eq!(zero, plain);
+    assert_eq!(zero.report.lines_deleted, 0);
+    assert!(!deletes(Some(1.0), 0.0) && !deletes(None, 0.5) && deletes(Some(0.5), 0.5));
+}
+
+#[test]
+fn fenced_and_keep_labelled_lines_are_never_deleted() {
+    let header = "Issue of 14 June 2026 — weekly digest";
+    let body = format!(
+        "Intro text of the post goes here.\n\n```\nSponsored code sample line\n```\n\n{header}\n\nBody one line here.\nBody two line here.\nBody three line here.\nBody four line here.\n"
+    );
+    let o = ans(&serde_json::json!([
+        span(
+            "Sponsored code sample line",
+            "Sponsored code sample line",
+            &serde_json::json!(0.99)
+        ),
+        span(header, header, &serde_json::json!(0.99)),
+    ]));
+    // A Keep recorded on another date's header vetoes through the masked key.
+    let labels = crate::boilerplate::Labels::from_lines(
+        ["Issue of 3 March 2025 — weekly digest"],
+        std::iter::empty(),
+    );
+    let e = enrich_with(
+        &body,
+        &o,
+        &[],
+        opts(),
+        Deletion {
+            threshold: 0.9,
+            labels: Some(&labels),
+        },
+    );
+    assert_eq!(e.report.lines_deleted, 0, "{}", e.text);
+    assert!(
+        e.text.contains("> Sponsored code sample line"),
+        "{}",
+        e.text
+    );
+    assert!(e.text.contains(&format!("> {header}")), "{}", e.text);
+    // Without the label the header is deleted; the fenced line still folds.
+    let e = tiered(&body, &o, 0.9);
+    assert_eq!(e.report.lines_deleted, 1, "{}", e.text);
+    assert!(!e.text.contains(header), "{}", e.text);
+    assert!(
+        e.text.contains("> Sponsored code sample line"),
+        "{}",
+        e.text
+    );
+}
+
+#[test]
+fn half_body_guard_counts_deleted_and_folded_together() {
+    let body =
+        "Keep one line.\nAd alpha.\nAd beta.\nKeep two line.\nAd gamma.\nAd delta.\nKeep three.\n";
+    let o = ans(&serde_json::json!([
+        span("Ad alpha.", "Ad beta.", &serde_json::json!(0.99)),
+        span("Ad gamma.", "Ad delta.", &serde_json::json!(0.1)),
+    ]));
+    let e = tiered(body, &o, 0.9);
+    assert!(e.report.fold_refused_over_half);
+    assert_eq!((e.report.lines_deleted, e.report.lines_folded), (0, 0));
+    assert_eq!(e.text, body);
+}
+
+/// The review-path equivalent of a deletion: fold at threshold 0, then Delete those groups.
+fn delete_groups(text: &str, ids: &[String]) -> String {
+    ids.iter().fold(text.to_owned(), |t, id| {
+        resolve_groups(&t, &GroupTarget::One(id.clone()), Verdict::Delete)
+            .unwrap()
+            .text
+    })
+}
+
+fn keep_all(text: &str) -> String {
+    resolve_groups(text, &GroupTarget::All, Verdict::Keep)
+        .unwrap()
+        .text
+}
+
+fn ids_with(text: &str, pick: impl Fn(&FoldGroup) -> bool) -> Vec<String> {
+    fold_groups(text)
+        .into_iter()
+        .filter(|g| pick(g))
+        .map(|g| g.id)
+        .collect()
+}
+
+#[test]
+fn repeated_anchor_pairs_keep_their_positions_on_replay() {
+    let body = "Lead paragraph of the note here.\n\nAd break.\n\nFirst section text line.\n\nSponsored by Example Boats Ltd.\n\nSecond section text line.\n\nAd break.\n\nThird section text line.\nFourth section text line.\nFifth section text line.\nSixth section text line.\n";
+    let o = ans(&serde_json::json!([
+        span("Ad break.", "Ad break.", &serde_json::json!(0.3)),
+        span(SPONSOR.0, SPONSOR.0, &serde_json::json!(0.99)),
+        span("Ad break.", "Ad break.", &serde_json::json!(0.3)),
+    ]));
+    let del = tiered(body, &o, 0.9);
+    assert_eq!(
+        (del.report.lines_deleted, del.report.spans_folded),
+        (1, 2),
+        "{}",
+        del.text
+    );
+    let fold = tiered(body, &o, 0.0);
+    // Same body; the two `Ad break.` groups carry the same anchors as when all three fold.
+    assert_eq!(body_part(&del.text), body_part(&fold.text));
+    let meta = |t: &str| -> Vec<String> {
+        t.lines()
+            .filter(|l| l.starts_with("%% cv-fold") && l.contains("lines=1 kind=sponsor"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let (m_del, m_fold) = (meta(&del.text), meta(&fold.text));
+    assert_eq!(m_del.len(), 2);
+    assert_eq!(m_del, vec![m_fold[0].clone(), m_fold[2].clone()]);
+    // Keep restores each repeated group exactly where the fold-then-Delete review would.
+    let sponsor = ids_with(&fold.text, |g| {
+        g.lines.iter().any(|l| l.contains("Sponsored"))
+    });
+    assert_eq!(
+        keep_all(&del.text),
+        keep_all(&delete_groups(&fold.text, &sponsor))
+    );
+    // Replay: no change, nothing deleted.
+    let again = tiered(&del.text, &o, 0.9);
+    assert_eq!(again.text, del.text);
+    assert_eq!(again.report.lines_deleted, 0);
+}
+
+#[test]
+fn prior_fold_group_keeps_position_and_id_after_a_deletion() {
+    let first = enrich(
+        TIER,
+        &ans(&serde_json::json!([span(
+            FOLLOW,
+            FOLLOW,
+            &serde_json::json!(0.5)
+        )])),
+        &[],
+        opts(),
+    )
+    .text;
+    let prior_ids = ids_with(&first, |_| true);
+    let o = ans(&serde_json::json!([span(
+        SPONSOR.0,
+        SPONSOR.1,
+        &serde_json::json!(0.99)
+    )]));
+    let del = tiered(&first, &o, 0.9);
+    assert_eq!(del.report.lines_deleted, 2);
+    assert_eq!(ids_with(&del.text, |_| true), prior_ids);
+    // The prior metadata line is carried byte-identical.
+    let prior_meta = first.lines().find(|l| l.starts_with("%% cv-fold")).unwrap();
+    assert!(del.text.lines().any(|l| l == prior_meta));
+    let fold = tiered(&first, &o, 0.0);
+    let sponsor = ids_with(&fold.text, |g| !prior_ids.contains(&g.id));
+    let keep = |t: &str| {
+        resolve_groups(t, &GroupTarget::One(prior_ids[0].clone()), Verdict::Keep)
+            .unwrap()
+            .text
+    };
+    assert_eq!(keep(&del.text), keep(&delete_groups(&fold.text, &sponsor)));
+    assert!(keep(&del.text).contains(&format!("\n{FOLLOW}\n")));
+}
+
+const FARMERS: &str = "Farmers plant along the newest banks each spring.";
+
+/// `body` enriched once with `FOLLOW` folded (anchored after `FARMERS`), and that group's id.
+fn with_prior(body: &str) -> (String, String) {
+    let first = enrich(
+        body,
+        &ans(&serde_json::json!([span(
+            FOLLOW,
+            FOLLOW,
+            &serde_json::json!(0.5)
+        )])),
+        &[],
+        opts(),
+    )
+    .text;
+    assert!(first.contains(&format!("| {FARMERS} %%")), "{first}");
+    let id = ids_with(&first, |_| true).remove(0);
+    (first, id)
+}
+
+fn keep_one(text: &str, id: &str) -> String {
+    resolve_groups(text, &GroupTarget::One(id.to_owned()), Verdict::Keep)
+        .unwrap()
+        .text
+}
+
+#[test]
+fn a_sure_span_on_a_prior_anchor_line_folds_and_keep_restores_the_prior_group() {
+    let (first, id) = with_prior(TIER);
+    let o = ans(&serde_json::json!([span(
+        FARMERS,
+        FARMERS,
+        &serde_json::json!(0.99)
+    )]));
+    let e = tiered(&first, &o, 0.9);
+    assert_eq!(e.report.lines_deleted, 0, "{}", e.text);
+    assert!(e.text.contains(&format!("> {FARMERS}")), "{}", e.text);
+    // Keep the new (anchor-line) group first, then the prior one: it lands at its original place.
+    let new = ids_with(&e.text, |g| g.id != id).remove(0);
+    let back = keep_one(&keep_one(&e.text, &new), &id);
+    assert!(back.contains(&format!("{FARMERS}\n\n{FOLLOW}\n")), "{back}");
+}
+
+#[test]
+fn a_sure_span_duplicating_a_prior_anchor_text_folds_and_keep_lands_in_place() {
+    let body = TIER.replace(
+        "Tourists come for the birds in autumn.",
+        &format!("Tourists come for the birds in autumn.\n{FARMERS}"),
+    );
+    let (first, id) = with_prior(&body);
+    let o = ans(&serde_json::json!([span(
+        FARMERS,
+        FARMERS,
+        &serde_json::json!(0.99)
+    )]));
+    let e = tiered(&first, &o, 0.9);
+    assert_eq!(e.report.lines_deleted, 0, "{}", e.text);
+    let back = keep_one(&e.text, &id);
+    assert!(back.contains(&format!("{FARMERS}\n\n{FOLLOW}\n")), "{back}");
 }

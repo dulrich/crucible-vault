@@ -409,6 +409,16 @@ pub static INTAKE_ENRICH: Record = Record {
             POS_INT,
         )
         .dflt(D::Int(20)),
+        field(
+            "delete_confidence",
+            "Delete confidence",
+            "Spans the model rates at or over this confidence are deleted instead of folded; 0 = off (plan abstract-removal-confidence-deletion WP-3)",
+            Node::Float {
+                min: Some(0.0),
+                max: Some(1.0),
+            },
+        )
+        .dflt(D::Float(0.0)),
     ],
     rules: &[],
     summary: None,

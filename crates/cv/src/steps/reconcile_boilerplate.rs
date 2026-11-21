@@ -147,7 +147,7 @@ fn line_keys(body: &str) -> Vec<u64> {
 }
 
 /// One publication's labels from `state.db`.
-fn load_labels(ctx: &StepCtx<'_>, publication: &str) -> Result<Labels, StepError> {
+pub(super) fn load_labels(ctx: &StepCtx<'_>, publication: &str) -> Result<Labels, StepError> {
     let l = ctx.state().publication_labels(publication)?;
     Ok(Labels::from_lines(
         l.keep.iter().map(String::as_str),

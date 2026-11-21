@@ -100,6 +100,17 @@ pub(crate) fn render_meta(n: usize, kind: &SpanKind, a: &Anchor) -> String {
     )
 }
 
+/// The `at=after` anchor text of a well-formed `%% cv-fold … %%` line, if it has one.
+pub(crate) fn meta_after_text(line: &str) -> Option<String> {
+    match parse_meta(line)? {
+        Ok(Meta {
+            anchor: Some(Anchor { after, .. }),
+            ..
+        }) => after.map(|(t, _)| t),
+        _ => None,
+    }
+}
+
 /// A `%% cv-fold … %%` line without a positive `lines=` count (its fold reads as old layout).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MalformedMeta;
