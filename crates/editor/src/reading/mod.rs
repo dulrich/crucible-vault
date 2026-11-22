@@ -181,7 +181,7 @@ struct ViewPlace {
     /// switch snaps the other mode to it. Cleared by the next user scroll.
     edge: Option<bool>,
     /// Plan round-5 WP-7: the Reading selection; never collapsed. Cleared whenever the Doc is
-    /// replaced.
+    /// replaced by one whose visible runs differ.
     sel: Option<Selection>,
     /// Plan round-5 WP-8: the Source side changed its selection more recently than the Reading
     /// side (Split: the most recent side feeds the action context).
@@ -238,7 +238,7 @@ impl DocReading {
         self.title = None;
     }
 
-    /// Drops every tab's selection (its Doc was replaced or dropped).
+    /// Drops every tab's selection (its Doc was replaced by one with other runs).
     fn clear_selections(&mut self) {
         self.views.values_mut().for_each(|v| {
             v.sel = None;
@@ -461,8 +461,12 @@ impl ReadingStore {
         let resolver_epoch = self.resolver.epoch();
         let epoch = doc.epoch();
         let entry = &mut od.reading;
-        // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
-        entry.clear_selections();
+        // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc — but a re-render
+        // that walks the very same runs (a resolver or index refresh after an unrelated vault
+        // change) leaves every selection position valid, so the selection is kept then.
+        if entry.doc.as_ref().is_none_or(|d| d.runs != runs) {
+            entry.clear_selections();
+        }
         entry.seen_seq = Some(seq);
         let fold_controls = fold_controls::controls(&model.blocks, &fold_groups);
         entry.doc = Some(Doc {

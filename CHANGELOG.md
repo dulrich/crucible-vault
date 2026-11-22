@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Editor: a text selection in Reading is no longer cleared when another file in the vault is created, deleted or renamed (for example when intake files a new note or saves an attachment). The selection is kept whenever the note's displayed text is unchanged by the refresh.
+
 ## 1.3.0 — 2026-11-21
 
 ### Added

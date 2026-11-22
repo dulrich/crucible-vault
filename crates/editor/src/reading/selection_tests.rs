@@ -388,6 +388,31 @@ fn selection_is_cleared_when_the_doc_re_renders() {
     assert!(h.boxes().len() == 1);
 }
 
+/// A re-render with the same visible runs (what a resolver epoch bump causes when another vault
+/// file is created, deleted or renamed) keeps the selection; a fold toggle changes the runs and
+/// clears it.
+#[test]
+fn selection_survives_a_re_render_with_the_same_runs() {
+    let mut h = H::new("alpha beta\n\n> [!note]- Title\n> hidden\n");
+    let sel = Selection::new(SelPos::new(0, 0), SelPos::new(0, 5));
+    h.store.set_selection(&mut h.docs, PATH, VIEW, Some(sel));
+    let before = h.store.recomputes;
+    let od = h.docs.get_mut(PATH).expect("doc");
+    h.store.recompute(od, None);
+    assert_eq!(h.store.recomputes, before + 1);
+    assert_eq!(h.store.selection(&h.docs, PATH, VIEW), Some(sel));
+    assert_eq!(h.text().as_deref(), Some("alpha"));
+    // Same text reloaded wholesale: still the same runs.
+    let od = h.docs.get_mut(PATH).expect("doc");
+    od.buffer = buffer("alpha beta\n\n> [!note]- Title\n> hidden\n");
+    h.store.recompute(od, None);
+    assert_eq!(h.store.selection(&h.docs, PATH, VIEW), Some(sel));
+    // Expanding the callout adds runs: the selection goes.
+    let od = h.docs.get_mut(PATH).expect("doc");
+    h.store.toggle_fold(od, 0, None);
+    assert_eq!(h.store.selection(&h.docs, PATH, VIEW), None);
+}
+
 #[test]
 fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
     let tmp = tempfile::tempdir().expect("tmp");
