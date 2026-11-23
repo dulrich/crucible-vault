@@ -1,6 +1,6 @@
 # WP-0 findings — watch ownership for folder links (plan `folder-links-follow`)
 
-Date 2026-11-22. notify 8.2.0 (the workspace pin), Linux inotify backend, kernel `max_queued_events` 16384, `max_user_watches` 553369. Spike crate: `docs/spikes/folder-links-watch/` (promoted from `runs/spike/folder-links-watch/`) (`Cargo.toml` + `src/main.rs`, own `[workspace]`, throwaway). Synthetic trees only, under `$TMPDIR`; the live vault was read for aggregate counts only.
+Date 2026-11-22. notify 8.2.0 (the workspace pin), Linux inotify backend, kernel `max_queued_events` 16384, `max_user_watches` 553369. Spike crate: `docs/spikes/folder-links-watch/` (`Cargo.toml` + `src/main.rs`, own `[workspace]`, throwaway). Synthetic trees only, under `$TMPDIR`; the live vault was read for aggregate counts only.
 
 Reproduce:
 
