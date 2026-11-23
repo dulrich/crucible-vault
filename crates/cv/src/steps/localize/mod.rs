@@ -177,6 +177,10 @@ pub(super) struct NoteCounts {
     pub(super) repaired: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) unrepairable: Option<u64>,
+    /// Old sources not retired because they lie outside the vault root (Decision 3, plan
+    /// folder-links-follow); absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) retire_skipped_outside: Option<u64>,
 }
 
 /// Localizes one note: its outcome vars and output paths.
@@ -349,6 +353,7 @@ pub(super) fn execute_note(
     })?;
     let changed = written.is_some();
     let mut output_paths = run.counts.created.clone();
+    let mut retire_outside = 0u64;
     if changed {
         output_paths.push(path.clone());
         // Retire re-homed local sources no other note references (Crucible processLocal's
@@ -367,6 +372,9 @@ pub(super) fn execute_note(
                 let r: Result<(), VaultError> =
                     ctx.with_writer(&[old.as_str()], move |vw| vw.delete(&o, h))?;
                 if let Err(e) = r {
+                    if e.is_automation_skip() {
+                        retire_outside += 1;
+                    }
                     tracing::debug!(error = %e, "localize: could not retire old attachment");
                 }
             }
@@ -386,6 +394,7 @@ pub(super) fn execute_note(
         thumbnails: c.thumbnails,
         delinked: c.delinked,
         media_links: c.media_links,
+        retire_skipped_outside: (retire_outside > 0).then_some(retire_outside),
         ..NoteCounts::default()
     };
     if p.repair {

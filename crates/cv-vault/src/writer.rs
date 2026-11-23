@@ -59,6 +59,9 @@ pub struct VaultWriter {
     events: Option<Sender<VaultEvent>>,
     /// The note-id binding (plan note-identity D1), written at the transition sites.
     ids: Box<dyn NoteIdSink>,
+    /// Decision 3: `Some` inside an automation scope ([`Self::automation`]), holding the vault
+    /// paths whose removal or move the guard skipped.
+    automation: Option<Vec<String>>,
 }
 
 /// Receives each [`TrashRecord`] right after its move (the daemon persists it to `trash_entries`).
@@ -88,6 +91,7 @@ impl VaultWriter {
             trash_sink: None,
             events: None,
             ids,
+            automation: None,
         }
     }
 
@@ -225,6 +229,40 @@ impl VaultWriter {
         self.ids.revive(id, path)
     }
 
+    /// Runs `f` as automation (a step's writer job, Decision 3): every delete, trash or move
+    /// inside it whose canonical location is outside the vault root is skipped with
+    /// [`VaultError::AutomationSkipped`] — whatever the link-write roots say — and its paths
+    /// (both endpoints for a move) are returned beside `f`'s result. User RPCs never enter this
+    /// scope, so they follow Decision 2 only.
+    pub fn automation<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> (T, Vec<String>) {
+        let outer = self.automation.replace(Vec::new());
+        let out = f(self);
+        let skipped = std::mem::replace(&mut self.automation, outer).unwrap_or_default();
+        if let Some(o) = &mut self.automation {
+            o.extend(skipped.iter().cloned());
+        }
+        (out, skipped)
+    }
+
+    /// Decision 3's guard: inside an automation scope, skips (and records) an operation on
+    /// `paths` when any of them lies outside the vault root.
+    fn automation_guard(&mut self, paths: &[&str]) -> Result<()> {
+        if self.automation.is_none() || !paths.iter().any(|p| self.fs.outside_root(p)) {
+            return Ok(());
+        }
+        let first = paths.first().copied().unwrap_or_default().to_string();
+        tracing::info!("automation skipped a removal or move outside the vault root");
+        if let Some(s) = &mut self.automation {
+            s.extend(paths.iter().map(|p| (*p).to_string()));
+        }
+        Err(VaultError::AutomationSkipped { path: first })
+    }
+
+    /// Bumps `path`'s mtime to now, confined like a write (the attachment-reuse touch).
+    pub fn touch(&mut self, path: &str) -> Result<()> {
+        self.fs.touch(path)
+    }
+
     /// Emits one writer-authored (`Origin::Daemon`) event, synchronously.
     fn emit(&self, path: &str, kind: EventKind, id: Option<NoteId>, hash: Option<&ContentHash>) {
         if let Some(tx) = &self.events
@@ -331,6 +369,8 @@ impl VaultWriter {
         reason: TrashReason,
         replaced_by: Option<&str>,
     ) -> Result<()> {
+        validate_rel_path(path)?;
+        self.automation_guard(&[path])?;
         if let Some(moved) = self.fs.remove_with(path, &expected, permanent)? {
             let trashed_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -441,6 +481,7 @@ impl VaultWriter {
         if self.fs.read(to)?.is_some() {
             return Err(VaultError::Exists(to.to_string()));
         }
+        self.automation_guard(&[from, to])?;
         let mut groups = self.backlink_groups(from)?;
         // The moved note's own folder-relative outgoing links (to other files) are rebased onto
         // its new folder in the same CAS write as its self-link rewrites.
@@ -578,6 +619,24 @@ impl VaultWriter {
     pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<RenameOutcome> {
         validate_rel_path(from)?;
         validate_rel_path(to)?;
+        // Decision 4: a folder rename never moves a file through a link, at the source (the
+        // folder itself, or a folder link anywhere under it) or the destination.
+        let refuse = |path: &str, reason: &str| VaultError::LinkWriteRefused {
+            path: path.to_string(),
+            reason: reason.to_string(),
+        };
+        if self.fs.dir_through_link(from) {
+            return Err(refuse(from, "the folder is reached through a folder link"));
+        }
+        if self.fs.dir_through_link(to) {
+            return Err(refuse(to, "the destination runs through a folder link"));
+        }
+        if let Some(link) = self.fs.folder_link_under(from) {
+            return Err(refuse(
+                &link,
+                "a folder link inside the folder would be renamed through",
+            ));
+        }
         let mut outcome = RenameOutcome::default();
         let mut plan = Vec::new();
         for f in self.fs.list_files(from)? {

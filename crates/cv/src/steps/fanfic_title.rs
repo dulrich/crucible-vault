@@ -162,8 +162,12 @@ fn plan_in(ctx: &StepCtx<'_>, path: &str, text: &str) -> Plan {
 
 /// How one rename attempt ended.
 enum Attempt {
-    Renamed { rewritten: Vec<String> },
+    Renamed {
+        rewritten: Vec<String>,
+    },
     Collision,
+    /// Decision 3 (plan folder-links-follow): the note is outside the vault root; not renamed.
+    Outside,
 }
 
 /// Renames `src` to `dst` through the writer (links rewritten); a taken target is a collision.
@@ -187,6 +191,7 @@ fn rename(ctx: &mut StepCtx<'_>, src: &str, dst: &str) -> Result<Attempt, StepEr
             })
         }
         Err(VaultError::Exists(_)) => Ok(Attempt::Collision),
+        Err(e) if e.is_automation_skip() => Ok(Attempt::Outside),
         Err(e) => Err(e.into()),
     }
 }
@@ -216,6 +221,7 @@ fn retitle(ctx: &mut StepCtx<'_>, path: &str) -> Result<bool, StepError> {
 struct NoteVars {
     fanfic_renamed: u32,
     fanfic_skipped_collision: u32,
+    fanfic_skipped_outside: u32,
     fanfic_undetected: u32,
     fanfic_already: u32,
     /// Already named right, but its `title` was stale and is now set to the name.
@@ -250,6 +256,7 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
         Plan::Undetected => v.fanfic_undetected = 1,
         Plan::Rename(dst) => match rename(ctx, &src, &dst)? {
             Attempt::Collision => v.fanfic_skipped_collision = 1,
+            Attempt::Outside => v.fanfic_skipped_outside = 1,
             Attempt::Renamed { rewritten } => {
                 v.fanfic_renamed = 1;
                 out.set_vars(&MovedVars {
@@ -278,6 +285,8 @@ pub(super) struct BackfillVars {
     /// Already named right with a stale `title` (dry run).
     pub(super) would_retitle: u32,
     pub(super) collision: u32,
+    /// Renames skipped because the note lies outside the vault root (Decision 3).
+    pub(super) outside: u32,
     pub(super) undetected: u32,
     pub(super) conflict: u32,
     dry_run: bool,
@@ -340,6 +349,7 @@ fn backfill(kind: &str, dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutc
         for (src, dst) in order {
             match rename(ctx, &src, &dst) {
                 Ok(Attempt::Collision) => v.collision += 1,
+                Ok(Attempt::Outside) => v.outside += 1,
                 Ok(Attempt::Renamed { rewritten }) => {
                     v.renamed += 1;
                     out.push_output(dst);

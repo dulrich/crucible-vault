@@ -164,6 +164,24 @@ fn move_rewrites_links_and_rerun_converges() {
     assert!(o.output_paths.is_empty());
 }
 
+/// Decision 3 (plan folder-links-follow): a step's move of a note reached through a folder link
+/// outside the vault is skipped and counted, never reported as a move.
+#[test]
+fn move_of_a_folder_linked_note_is_skipped_not_reported() {
+    let env = example_env(&[("ref.md", "see [[ext/x]]\n")]);
+    let ext = tempfile::tempdir().unwrap();
+    std::fs::write(ext.path().join("x.md"), "# X\n").unwrap();
+    std::os::unix::fs::symlink(ext.path(), env.vault().join("ext")).unwrap();
+    let step = "type = \"move\"\nto = \"archive\"";
+    let o = env.run(step, json!({}), active("ext/x.md")).unwrap();
+    assert_eq!(o.vars["move_skipped_outside"], json!(1));
+    assert_eq!(o.vars["moved_path"], json!("ext/x.md"));
+    assert_eq!(o.open_path.as_deref(), Some("ext/x.md"));
+    assert!(o.output_paths.is_empty(), "{:?}", o.output_paths);
+    assert!(ext.path().join("x.md").is_file());
+    assert!(env.read("archive/x.md").is_none());
+}
+
 #[test]
 fn file_as_kind_tags_moves_and_lints() {
     let env = example_env(&[

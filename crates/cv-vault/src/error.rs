@@ -27,6 +27,12 @@ pub enum VaultError {
     /// never replaced.
     #[error("write through the symlinked note {path} refused: {reason}")]
     LinkWriteRefused { path: String, reason: String },
+    /// Decision 3 (plan folder-links-follow): an automation-originated removal or move of `path`
+    /// was skipped because its canonical location is outside the vault root, whatever the
+    /// link-write roots say. Nothing was touched; callers count it and never report it as a
+    /// move or deletion. Only raised inside [`crate::VaultWriter::automation`] scopes.
+    #[error("automation skipped {path}: its canonical location is outside the vault root")]
+    AutomationSkipped { path: String },
     #[error("io at {path}: {source}")]
     Io {
         path: String,
@@ -46,6 +52,14 @@ pub enum VaultError {
     /// The writer thread is gone (panicked or shut down).
     #[error("writer thread is gone")]
     WriterGone,
+}
+
+impl VaultError {
+    /// Whether this is the automation guard's skip ([`VaultError::AutomationSkipped`]).
+    #[must_use]
+    pub fn is_automation_skip(&self) -> bool {
+        matches!(self, Self::AutomationSkipped { .. })
+    }
 }
 
 /// `Result` with [`VaultError`].

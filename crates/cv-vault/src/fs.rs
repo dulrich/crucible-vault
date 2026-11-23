@@ -82,6 +82,21 @@ fn relink_target(src: &Path, dest: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(out))
 }
 
+/// An io error, with a cross-filesystem failure named as such: a move never falls back to a
+/// silent copy + delete.
+fn cross_device(path: &Path, e: std::io::Error) -> VaultError {
+    if e.kind() == std::io::ErrorKind::CrossesDevices {
+        return io(
+            path,
+            std::io::Error::new(
+                e.kind(),
+                "cross-filesystem move refused (cv never copies and deletes)",
+            ),
+        );
+    }
+    io(path, e)
+}
+
 #[cfg(test)]
 pub(crate) static FAIL_BEFORE_PERSIST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -149,14 +164,109 @@ impl VaultFs {
         if !target.is_file() {
             return Err(refuse("the link target is not a regular file"));
         }
-        let allowed = target.starts_with(&self.root)
-            || self.link_write_roots.iter().any(|r| target.starts_with(r));
-        if !allowed {
+        if !self.allowed(&target) {
             return Err(refuse(
                 "the link target is outside the vault root and every link-write root",
             ));
         }
         Ok(target)
+    }
+
+    /// The canonical location of `path`'s parent folder (Decision 2: every link component of
+    /// the parent chain resolved): the nearest existing ancestor, canonicalized, plus the
+    /// not-yet-existing tail a write would create as real folders. `Err(reason)` when an
+    /// existing component is a dangling link or cannot be resolved.
+    fn canonical_parent(&self, path: &str) -> std::result::Result<PathBuf, &'static str> {
+        let full = self.root.join(path);
+        let mut existing = full.parent().unwrap_or(&self.root).to_path_buf();
+        let mut tail = Vec::new();
+        while existing != self.root {
+            match existing.symlink_metadata() {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let Some(name) = existing.file_name() else {
+                        break;
+                    };
+                    tail.push(name.to_os_string());
+                    if !existing.pop() {
+                        break;
+                    }
+                }
+                Err(_) => return Err("a folder on its path cannot be resolved"),
+            }
+        }
+        let mut canon = std::fs::canonicalize(&existing)
+            .map_err(|_| "a folder link on its path is dangling")?;
+        for name in tail.into_iter().rev() {
+            canon.push(name);
+        }
+        Ok(canon)
+    }
+
+    /// Whether canonical `p` lies under the vault root or a link-write root.
+    fn allowed(&self, p: &Path) -> bool {
+        p.starts_with(&self.root) || self.link_write_roots.iter().any(|r| p.starts_with(r))
+    }
+
+    /// Decision 2: the canonical parent folder of the **entry** `path` (what a create, rename or
+    /// unlink mutates), refused unless it lies under the vault root or a link-write root.
+    fn confine_entry(&self, path: &str) -> Result<PathBuf> {
+        let refuse = |reason: &str| VaultError::LinkWriteRefused {
+            path: path.to_string(),
+            reason: reason.to_string(),
+        };
+        let parent = self.canonical_parent(path).map_err(refuse)?;
+        if !self.allowed(&parent) {
+            return Err(refuse(
+                "its folder resolves outside the vault root and every link-write root",
+            ));
+        }
+        Ok(parent)
+    }
+
+    /// Decision 4: whether folder `dir` is reached through a link (any component of its own
+    /// chain, itself included, is a symlink or cannot be resolved).
+    pub(crate) fn dir_through_link(&self, dir: &str) -> bool {
+        self.canonical_parent(&format!("{dir}/x"))
+            .map_or(true, |c| c != self.root.join(dir))
+    }
+
+    /// Decision 4: the first folder link (a symlink that is not a file link, dangling included)
+    /// under folder `dir`, as a vault path. `dir` itself is not considered.
+    pub(crate) fn folder_link_under(&self, dir: &str) -> Option<String> {
+        let start = self.root.join(dir);
+        walkdir::WalkDir::new(&start)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .find(|e| e.path_is_symlink() && !e.path().is_file())
+            .and_then(|e| cv_index::rel_path(&self.root, e.path()))
+    }
+
+    /// Decision 3: whether a removal or move of the entry `path` would act outside the vault
+    /// root — its parent chain resolves outside it (through a folder link). Unresolvable parents
+    /// count as outside (fail safe). A terminal file link is judged by its entry, not its
+    /// referent (cycle-2 E2: rename/delete act on the link). Write roots are not consulted.
+    pub fn outside_root(&self, path: &str) -> bool {
+        self.canonical_parent(path)
+            .map_or(true, |parent| !parent.starts_with(&self.root))
+    }
+
+    /// Bumps the mtime of `path`'s referent to now (the attachment-reuse touch), confined like
+    /// [`Self::put`]: a terminal link through [`Self::write_target`], a plain entry by its
+    /// canonical parent chain.
+    pub fn touch(&self, path: &str) -> Result<()> {
+        validate_rel_path(path)?;
+        let full = self.root.join(path);
+        let target = self.write_target(path, &full)?;
+        if target == full {
+            self.confine_entry(path)?;
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+            .map_err(|e| io(&target, e))
     }
 
     /// The (canonical) live vault root.
@@ -201,6 +311,10 @@ impl VaultFs {
         let vault_full = self.root.join(path);
         // A write through a symlinked note lands on its (confined) target.
         let full = self.write_target(path, &vault_full)?;
+        if full == vault_full {
+            // Decision 2: a plain entry lands through its parent chain; confine it.
+            self.confine_entry(path)?;
+        }
         self.check(path, expected)?;
         let dir = full.parent().unwrap_or(&self.root).to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
@@ -250,6 +364,7 @@ impl VaultFs {
             return Err(VaultError::NotFound(path.to_string()));
         }
         self.check(path, Some(expected))?;
+        self.confine_entry(path)?;
         if permanent {
             let src = self.root.join(path);
             std::fs::remove_file(&src).map_err(|e| io(&src, e))?;
@@ -267,11 +382,17 @@ impl VaultFs {
             }));
         }
         let trash_rel = self.trash_slot(path);
-        let dest = self.root.join(&trash_rel);
+        // Trash storage guard: the `.trash/…` destination never runs through a link.
+        let dest = crate::trash::storage_path(&self.root, &trash_rel).map_err(|e| {
+            VaultError::LinkWriteRefused {
+                path: path.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         if let Some(d) = dest.parent() {
             std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
         }
-        std::fs::rename(&src, &dest).map_err(|e| io(&src, e))?;
+        std::fs::rename(&src, &dest).map_err(|e| cross_device(&src, e))?;
         Ok(Some(TrashMove {
             location: TrashLocation::Vault,
             trash_path: trash_rel,
@@ -322,6 +443,9 @@ impl VaultFs {
             return Err(VaultError::Exists(to.to_string()));
         }
         self.check(from, Some(expected))?;
+        // Decision 2: both entries' parent chains are confined.
+        self.confine_entry(from)?;
+        self.confine_entry(to)?;
         let src = self.root.join(from);
         let dest = self.root.join(to);
         if let Some(d) = dest.parent() {
@@ -339,7 +463,7 @@ impl VaultFs {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 return Err(VaultError::Exists(to.to_string()));
             }
-            Err(e) => return Err(io(&dest, e)),
+            Err(e) => return Err(cross_device(&dest, e)),
         }
         #[cfg(test)]
         let removed = if FAIL_REMOVE_SRC.load(std::sync::atomic::Ordering::SeqCst) {

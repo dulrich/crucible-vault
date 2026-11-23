@@ -349,7 +349,13 @@ impl Shared {
             } else {
                 // Reuse: bump the mtime so the `tidy` sweep's grace period protects the file
                 // until the pasted note links it (plan tidiness-trash-orphans WP-2, audit B4).
-                crate::steps::util::touch_now(vw.fs().root(), &t);
+                // Confined like a write (plan folder-links-follow WP-1): refused outside
+                // every root; other failures stay best effort.
+                match vw.touch(&t) {
+                    Ok(()) => {}
+                    Err(e @ VaultError::LinkWriteRefused { .. }) => return Err(e.into()),
+                    Err(e) => tracing::warn!(error = %e, "bumping a reused attachment's mtime"),
+                }
             }
             Ok(())
         })

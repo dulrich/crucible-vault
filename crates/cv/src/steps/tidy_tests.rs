@@ -9,7 +9,7 @@ use cv_state::NewTrashEntry;
 use cv_vault::test_support::LiveFixture;
 use cv_vault::{ContentHash, FileIdentity, TrashLocation, TrashMove, TrashReason, TrashRecord};
 
-use super::{DAY_MS, Params, run_in, sweep_one};
+use super::{DAY_MS, Params, Sweep, run_in, sweep_one};
 use crate::steps::testkit::{ActionBuilder, StepEnv, config_of};
 use crate::steps::{StepOutcome, validate};
 
@@ -235,6 +235,31 @@ fn sweep(e: &StepEnv, path: &str, hash: ContentHash) -> bool {
     e.fx.writer
         .call(move |vw| sweep_one(vw, &root, &path, hash, 24 * 3_600_000, at))
         .unwrap()
+        == Sweep::Trashed
+}
+
+/// Decision 3 (plan folder-links-follow): an orphan reached through a folder link outside the
+/// vault is skipped and counted by the step's automation scope, never trashed.
+#[test]
+fn orphan_through_a_folder_link_is_skipped_as_outside() {
+    let e = orphan_env();
+    let ext = tmp();
+    std::fs::write(ext.path().join("x_MD5.png"), "external bytes").unwrap();
+    set_old(&ext.path().join("x_MD5.png"), 3);
+    std::os::unix::fs::symlink(ext.path(), e.fx.vault.join("ext")).unwrap();
+    let root = e.fx.vault.clone();
+    let at = now();
+    let hash = ContentHash::of(b"external bytes");
+    let (r, skipped) =
+        e.fx.writer
+            .call(move |vw| {
+                vw.automation(|vw| sweep_one(vw, &root, "ext/x_MD5.png", hash, 24 * 3_600_000, at))
+            })
+            .unwrap();
+    assert_eq!(r, Sweep::Outside);
+    assert_eq!(skipped, vec!["ext/x_MD5.png".to_owned()]);
+    assert!(ext.path().join("x_MD5.png").is_file());
+    assert!(!e.fx.vault.join(".trash/ext").exists());
 }
 
 #[test]

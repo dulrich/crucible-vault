@@ -74,6 +74,8 @@ impl SystemTrash {
     /// `Ok(None)` = the rename failed for a reason other than `NotFound` (the caller falls back);
     /// `Err` = the file vanished, or the trash directories could not be prepared.
     pub(crate) fn move_in(&self, src: &Path, rel: &str) -> std::io::Result<Option<String>> {
+        storage_path(&self.root, "files/x")?;
+        storage_path(&self.root, "info/x")?;
         let files = self.root.join("files");
         let info = self.root.join("info");
         std::fs::create_dir_all(&files)?;
@@ -195,6 +197,37 @@ impl TrashRecord {
     }
 }
 
+/// The trash storage guard (plan folder-links-follow WP-1): `base/rel` when neither `base`
+/// itself nor any existing folder of `rel`'s parent chain is a symlink, so the constructed path's
+/// canonical parent stays where it reads (a linked `.trash`, `Trash/files` or `Trash/info` is
+/// refused). Separate from the live-vault link-write allowlist: no write root admits trash
+/// storage through a link. `rel` is `/`-separated; its last component is not checked (the
+/// entry itself is identity-checked by its caller).
+pub fn storage_path(base: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    let linked = |p: &Path| {
+        p.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+    };
+    let refuse = |p: &Path| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("trash storage runs through the link {}", p.display()),
+        )
+    };
+    if linked(base) {
+        return Err(refuse(base));
+    }
+    let mut cur = base.to_path_buf();
+    let parts: Vec<&str> = rel.split('/').collect();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        cur.push(part);
+        if linked(&cur) {
+            return Err(refuse(&cur));
+        }
+    }
+    Ok(base.join(rel))
+}
+
 /// Identity of `p` (no follow).
 pub fn identity(p: &Path) -> std::io::Result<FileIdentity> {
     let md = p.symlink_metadata()?;
@@ -224,6 +257,8 @@ pub struct SystemTrashEntry {
 /// (`StateDb::trash_entry_by_path("system", name)`). Unmarked entries are never returned. A
 /// missing trash directory is an empty list.
 pub fn cv_owned_system_entries(trash_root: &Path) -> std::io::Result<Vec<SystemTrashEntry>> {
+    storage_path(trash_root, "info/x")?;
+    storage_path(trash_root, "files/x")?;
     let info = trash_root.join("info");
     let rd = match std::fs::read_dir(&info) {
         Ok(rd) => rd,

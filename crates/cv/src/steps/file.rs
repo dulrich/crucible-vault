@@ -429,9 +429,25 @@ fn move_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError
         return Err(StepError::failed("move source note not found"));
     };
     let (s2, d2) = (src.clone(), dst.clone());
-    let r = ctx.with_writer(&[src.as_str(), dst.as_str()], move |vw| {
+    let r = match ctx.with_writer(&[src.as_str(), dst.as_str()], move |vw| {
         vw.rename(&s2, &d2, hash)
-    })??;
+    })? {
+        Ok(r) => r,
+        // Decision 3 (plan folder-links-follow): skipped and counted, never reported as a move.
+        Err(e) if e.is_automation_skip() => {
+            let mut out = StepOutcome::default();
+            out.set_vars(&MoveVars {
+                moved_path: src.clone(),
+                link_conflicts: None,
+            });
+            out.set_vars(&MoveSkipped {
+                move_skipped_outside: 1,
+            });
+            out.open_path = Some(src);
+            return Ok(out);
+        }
+        Err(e) => return Err(e.into()),
+    };
     out.output_paths.push(dst);
     out.output_paths.extend(r.rewritten);
     if !r.skipped_conflicts.is_empty() {
@@ -440,6 +456,12 @@ fn move_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError
         });
     }
     Ok(out)
+}
+
+/// `move` outcome var when the move was skipped (Decision 3: the note is outside the vault root).
+#[derive(Serialize)]
+struct MoveSkipped {
+    move_skipped_outside: u32,
 }
 
 /// `move` outcome vars.

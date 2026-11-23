@@ -36,7 +36,8 @@
 //! | `min_age_hours` | integer >= 1 (no coercion: floats, strings and `0` are refused) | `24` |
 //!
 //! Outcome vars (counts and bytes; logs never carry paths): `orphans_trashed`, `orphan_bytes`,
-//! `orphans_skipped`, `seeded`, `adopted`, `expired`, `expired_bytes`, `rows_dropped`.
+//! `orphans_skipped` (of which `orphans_outside`: outside the vault root, Decision 3 of plan
+//! folder-links-follow), `seeded`, `adopted`, `expired`, `expired_bytes`, `rows_dropped`.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -110,6 +111,8 @@ struct Vars {
     orphans_trashed: u64,
     orphan_bytes: u64,
     orphans_skipped: u64,
+    /// Of `orphans_skipped`: outside the vault root (Decision 3, plan folder-links-follow).
+    orphans_outside: u64,
     seeded: u64,
     adopted: u64,
     expired: u64,
@@ -139,6 +142,7 @@ pub(crate) fn run_in(
         orphans_trashed = v.orphans_trashed,
         orphan_bytes = v.orphan_bytes,
         orphans_skipped = v.orphans_skipped,
+        orphans_outside = v.orphans_outside,
         seeded = v.seeded,
         adopted = v.adopted,
         expired = v.expired,
@@ -199,7 +203,11 @@ fn seed(
     v: &mut Vars,
 ) -> Result<(), StepError> {
     let mut files = Vec::new();
-    walk_files(&ctx.vault_root.join(".trash"), ".trash", &mut files);
+    // Trash storage guard (plan folder-links-follow WP-1): a linked `.trash` is never walked.
+    match cv_vault::trash::storage_path(ctx.vault_root, ".trash/x") {
+        Ok(_) => walk_files(&ctx.vault_root.join(".trash"), ".trash", &mut files),
+        Err(e) => tracing::warn!(error = %e, "not seeding the vault trash"),
+    }
     files.sort();
     for rel in files {
         let full = ctx.vault_root.join(&rel);
@@ -347,7 +355,14 @@ fn expire(
 }
 
 fn remove_vault(ctx: &mut StepCtx<'_>, e: &NewTrashEntry) -> Result<Removal, StepError> {
-    let full = ctx.vault_root.join(&e.trash_path);
+    // Trash storage guard: never expire through a linked `.trash` chain (the row is kept).
+    let full = match cv_vault::trash::storage_path(ctx.vault_root, &e.trash_path) {
+        Ok(f) => f,
+        Err(err) => {
+            tracing::warn!(error = %err, "not expiring through a linked vault trash");
+            return Ok(Removal::Failed);
+        }
+    };
     let row = e.clone();
     ctx.with_writer(&[], move |_| match cv_vault::trash::identity(&full) {
         Ok(id) if identity_matches(&row, id) => match std::fs::remove_file(&full) {
@@ -365,7 +380,15 @@ fn remove_system(root: &Path, e: &NewTrashEntry) -> Removal {
     if !plain_name(&e.trash_path) {
         return Removal::Gone;
     }
-    let file = root.join("files").join(&e.trash_path);
+    let file = match cv_vault::trash::storage_path(root, &format!("files/{}", e.trash_path))
+        .and_then(|f| cv_vault::trash::storage_path(root, "info/x").map(|_| f))
+    {
+        Ok(f) => f,
+        Err(err) => {
+            tracing::warn!(error = %err, "not expiring through a linked system trash");
+            return Removal::Failed;
+        }
+    };
     match cv_vault::trash::identity(&file) {
         Ok(id) if identity_matches(e, id) => {}
         _ => return Removal::Gone,
@@ -404,17 +427,32 @@ fn orphans(
         let ok = ctx.with_writer(&[], move |vw| {
             sweep_one(vw, &root, &path, hash, min_age_ms, now)
         })?;
-        if ok {
-            v.orphans_trashed += 1;
-            v.orphan_bytes += bytes.len() as u64;
-        } else {
-            v.orphans_skipped += 1;
+        match ok {
+            Sweep::Trashed => {
+                v.orphans_trashed += 1;
+                v.orphan_bytes += bytes.len() as u64;
+            }
+            Sweep::Kept => v.orphans_skipped += 1,
+            Sweep::Outside => {
+                v.orphans_skipped += 1;
+                v.orphans_outside += 1;
+            }
         }
     }
     Ok(())
 }
 
-/// The writer-side re-check and move for one orphan; `true` = trashed.
+/// What [`sweep_one`] did with one orphan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sweep {
+    Trashed,
+    /// Re-check failed (young, referenced, not a regular file, or the trash failed).
+    Kept,
+    /// Decision 3 (plan folder-links-follow): outside the vault root; the guard skipped it.
+    Outside,
+}
+
+/// The writer-side re-check and move for one orphan.
 pub(crate) fn sweep_one(
     vw: &mut cv_vault::VaultWriter,
     root: &Path,
@@ -422,24 +460,27 @@ pub(crate) fn sweep_one(
     hash: ContentHash,
     min_age_ms: i64,
     now: i64,
-) -> bool {
+) -> Sweep {
     let Ok(md) = root.join(path).symlink_metadata() else {
-        return false;
+        return Sweep::Kept;
     };
     if !md.is_file() {
-        return false;
+        return Sweep::Kept;
     }
     let mtime_ms = md.mtime() * 1000 + md.mtime_nsec() / 1_000_000;
     if now - mtime_ms < min_age_ms {
-        return false;
+        return Sweep::Kept;
     }
     let unreferenced = cv_index::referenced_elsewhere(&vw.index().query(), path, "")
         .is_ok_and(|referenced| !referenced);
     if !unreferenced {
-        return false;
+        return Sweep::Kept;
     }
-    vw.trash_with_reason(path, hash, TrashReason::Orphan)
-        .is_ok()
+    match vw.trash_with_reason(path, hash, TrashReason::Orphan) {
+        Ok(()) => Sweep::Trashed,
+        Err(e) if e.is_automation_skip() => Sweep::Outside,
+        Err(_) => Sweep::Kept,
+    }
 }
 
 #[cfg(test)]

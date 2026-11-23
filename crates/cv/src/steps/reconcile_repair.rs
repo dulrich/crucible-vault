@@ -69,6 +69,8 @@ pub(super) struct Counts {
     dup_other: u32,
     dup_distinct: u32,
     dup_conflict: u32,
+    /// Duplicates left alone: outside the vault root (Decision 3, plan folder-links-follow).
+    dup_outside: u32,
     publication_backfilled: u32,
     publication_overwritten: u32,
     publication_no_row: u32,
@@ -261,6 +263,13 @@ fn merge(
         c.dup_merged += 1;
         return Ok(());
     }
+    // Decision 3: a duplicate outside the vault root is never trashed, so its trackers are
+    // never re-pointed either.
+    let q = path.to_owned();
+    if ctx.with_writer(&[], move |w| w.fs().outside_root(&q))? {
+        c.dup_outside += 1;
+        return Ok(());
+    }
     // Re-associate before trash (audit M1): no row may ever point at a missing note.
     {
         let mut db = ctx.state();
@@ -277,6 +286,7 @@ fn merge(
     match ctx.with_writer(&[path], move |w| w.delete(&p, hash))? {
         Ok(()) => c.dup_merged += 1,
         Err(VaultError::Conflict { .. }) => c.dup_conflict += 1,
+        Err(e) if e.is_automation_skip() => c.dup_outside += 1,
         Err(e) => return Err(e.into()),
     }
     Ok(())

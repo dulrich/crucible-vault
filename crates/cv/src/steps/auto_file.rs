@@ -220,6 +220,16 @@ pub(in crate::steps) fn hosts_kind(
     Ok(None)
 }
 
+/// What [`trash`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trashed {
+    /// The note is in the trash.
+    Done,
+    /// Decision 3 (plan folder-links-follow): the note lies outside the vault root, so the
+    /// automation guard left it alone. Callers must not declare or act on a trash.
+    SkippedOutside,
+}
+
 /// Moves `path` to `.trash/` (recoverable, CAS on `hash`), recording that `by` absorbed it so
 /// the `deleted` notification carries `replaced_by` (round 11 WP-1, Decision 1).
 pub(crate) fn trash(
@@ -227,10 +237,13 @@ pub(crate) fn trash(
     path: &str,
     hash: cv_vault::ContentHash,
     by: &str,
-) -> Result<(), StepError> {
+) -> Result<Trashed, StepError> {
     let (p, by) = (path.to_owned(), by.to_owned());
-    ctx.with_writer(&[path], move |w| w.delete_replaced(&p, hash, &by))??;
-    Ok(())
+    match ctx.with_writer(&[path], move |w| w.delete_replaced(&p, hash, &by))? {
+        Ok(()) => Ok(Trashed::Done),
+        Err(e) if e.is_automation_skip() => Ok(Trashed::SkippedOutside),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Sets `publication` on the clip when absent (one CAS modify; never overwrites).
@@ -370,7 +383,11 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     vars.target.clone_from(&resolved.path);
     match (resolved.action, resolved.path) {
         (Action::Replaced, Some(target)) => {
-            trash(ctx, &clip_path, clip_hash, &target)?;
+            if trash(ctx, &clip_path, clip_hash, &target)? == Trashed::SkippedOutside {
+                vars.action = "skipped_outside";
+                out.set_vars(&vars);
+                return Ok(out);
+            }
             // The target took the clip's body: enrich it in place (the trashed clip never is).
             vars.enrich_job_id = enrich(ctx, &target);
             out.push_output(target);
@@ -409,8 +426,10 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                     >= f64::from(sup_cfg.threshold_percent.min(100))
             });
             if contained {
-                trash(ctx, &clip_path, clip_hash, &target)?;
-                vars.action = "merged";
+                vars.action = match trash(ctx, &clip_path, clip_hash, &target)? {
+                    Trashed::Done => "merged",
+                    Trashed::SkippedOutside => "skipped_outside",
+                };
                 out.set_vars(&vars);
                 return Ok(out);
             }

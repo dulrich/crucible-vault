@@ -250,9 +250,13 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         // commit in one state transaction before the trash, so a failed trash never leaves rows
         // on a trashed note and a retry (any boundary) reuses the committed label.
         let (_, repointed) = ctx.state().record_dup_verdict(&label, true)?;
-        super::auto_file::trash(ctx, &other, o_hash, &keep)?;
-        // Best-effort once the trash is done: a conflict here never defers (the label is safe).
-        if let Err(e) = relabel(ctx, &r, &keep, &other, false) {
+        let trashed = super::auto_file::trash(ctx, &other, o_hash, &keep)?;
+        if trashed == super::auto_file::Trashed::SkippedOutside {
+            // Decision 3 (plan folder-links-follow): no trash happened, so nothing is relabelled
+            // as if it had; the verdict above is a decision record and stays.
+            vars.insert("trash_skipped_outside".into(), true.into());
+        } else if let Err(e) = relabel(ctx, &r, &keep, &other, false) {
+            // Best-effort once the trash is done: a conflict here never defers (the label is safe).
             tracing::warn!(keep = %keep, error = %e, "dupes_resolve: relabel after trash failed");
         }
         vars.insert("inbound_links".into(), inbound.into());

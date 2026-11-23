@@ -87,7 +87,7 @@ impl StepModule for MediaCleanup {
                 let ok = ctx.with_writer(&[], move |vw| {
                     super::tidy::sweep_one(vw, &root, &path, hash, min_age_ms, now)
                 })?;
-                if ok {
+                if ok == super::tidy::Sweep::Trashed {
                     v.media_trashed += 1;
                 } else {
                     v.media_skipped += 1;

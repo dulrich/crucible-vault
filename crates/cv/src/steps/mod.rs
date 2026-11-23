@@ -529,8 +529,16 @@ impl<'a> StepCtx<'a> {
         for p in touched {
             self.arm(p);
         }
-        let out = self.writer()?.call(f)?;
-        self.written.extend(touched.iter().map(|s| (*s).to_owned()));
+        // Decision 3 (plan folder-links-follow): a step's writer job runs as automation, so a
+        // removal or move outside the vault root is skipped; a skipped path is never recorded
+        // as written.
+        let (out, skipped) = self.writer()?.call(move |vw| vw.automation(f))?;
+        self.written.extend(
+            touched
+                .iter()
+                .filter(|s| !skipped.iter().any(|k| k == *s))
+                .map(|s| (*s).to_owned()),
+        );
         Ok(out)
     }
 
