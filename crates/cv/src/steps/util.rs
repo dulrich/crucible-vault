@@ -65,67 +65,80 @@ where
     })?
 }
 
-/// Every `.md` file under `<vault_root>/<rel>` (recursive, read-only, no symlinks), as
-/// vault-relative paths.
-pub(crate) fn md_files_under(ctx: &StepCtx<'_>, rel: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![rel.trim_matches('/').to_owned()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(ctx.vault_root.join(&dir)) else {
-            continue;
-        };
-        for e in rd.filter_map(Result::ok) {
-            let Ok(name) = e.file_name().into_string() else {
-                continue;
-            };
-            let Ok(ft) = e.file_type() else { continue };
-            let p = format!("{dir}/{name}");
-            if ft.is_dir() {
-                stack.push(p);
-            } else if ft.is_file() && name.ends_with(".md") {
-                out.push(p);
-            }
+/// The vault-wide listing discovery of `root` (plan folder-links-follow Decision 5: folder links
+/// followed, one owner per canonical directory), pruning excluded directories `prune` accepts. A
+/// failed walk is logged and lists nothing.
+fn listing(root: &std::path::Path, prune: &dyn Fn(&str) -> bool) -> Vec<cv_index::DiscoveredFile> {
+    match cv_index::discover_listing(root, prune) {
+        Ok(d) => d.files,
+        Err(e) => {
+            tracing::warn!(error = %e, "vault listing failed");
+            Vec::new()
         }
     }
-    out.sort();
-    out
+}
+
+/// Every `.md` file under `<vault_root>/<rel>` (recursive, read-only, no file links), as
+/// vault-relative paths: the vault-wide discovery filtered to `rel` (folder links followed under
+/// Decision 5; ignored files still listed).
+pub(crate) fn md_files_under(ctx: &StepCtx<'_>, rel: &str) -> Vec<String> {
+    let rel = rel.trim_matches('/');
+    let under = |p: &str| {
+        rel.is_empty()
+            || p.strip_prefix(rel)
+                .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+    };
+    // Only excluded directories outside `rel`'s subtree (and not on its way) are pruned.
+    let prune = |d: &str| !(under(d) || rel.starts_with(&format!("{d}/")));
+    listing(ctx.vault_root, &prune)
+        .into_iter()
+        .filter(|f| !f.file_link && f.path.ends_with(".md") && under(&f.path) && f.path != rel)
+        .map(|f| f.path)
+        .collect()
 }
 
 /// Every file in the vault outside the top-level `_custom/` and every dot-directory (`.trash/`,
-/// `.git/`, ...), recursive, read-only, no symlinks, sorted, vault-relative; root-level files
-/// included (plan remote-media-sprint WP-4, Decision 5). Deliberately not
+/// `.git/`, ...), recursive, read-only, no file links, sorted, vault-relative; root-level files
+/// included (plan remote-media-sprint WP-4, Decision 5). Folder links are followed under plan
+/// folder-links-follow Decision 5 (the vault-wide discovery, filtered). Deliberately not
 /// [`cv_text::vpath::is_user_path`]: that predicate also skips every other `_`-prefixed top
 /// folder (`_yt_metadata`, …), which this walk must include, and it never skips a nested
 /// dot-directory the way this walk does — the two rules differ, so they stay separate.
 pub(crate) fn vault_files(root: &std::path::Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![String::new()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(root.join(&dir)) else {
-            continue;
-        };
-        for e in rd.filter_map(Result::ok) {
-            let Ok(name) = e.file_name().into_string() else {
-                continue;
-            };
-            let Ok(ft) = e.file_type() else { continue };
-            let p = if dir.is_empty() {
-                name.clone()
-            } else {
-                format!("{dir}/{name}")
-            };
-            if ft.is_dir() {
-                if name.starts_with('.') || (dir.is_empty() && name == "_custom") {
-                    continue;
-                }
-                stack.push(p);
-            } else if ft.is_file() {
-                out.push(p);
-            }
-        }
+    let dot_dir = |p: &str| p.split('/').any(|c| c.starts_with('.'));
+    listing(root, &dot_dir)
+        .into_iter()
+        .filter(|f| {
+            let dir = f.path.rsplit_once('/').map_or("", |(d, _)| d);
+            !f.file_link && !dot_dir(dir) && !f.path.starts_with("_custom/")
+        })
+        .map(|f| f.path)
+        .collect()
+}
+
+/// The names of the direct child folders of vault folder `root`, sorted: its physical
+/// subdirectories plus every folder link under it that owns its target (plan folder-links-follow
+/// Decision 5; a losing alias or loop is never listed).
+pub(crate) fn child_dirs(vault_root: &std::path::Path, root: &str) -> Vec<String> {
+    let root = root.trim_matches('/');
+    let Ok(rd) = std::fs::read_dir(vault_root.join(root)) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<String> = rd
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    match cv_index::discover(vault_root) {
+        Ok(d) => dirs.extend(d.ownership.dirs().filter_map(|(dir, _)| {
+            let (parent, name) = dir.rsplit_once('/').unwrap_or(("", dir));
+            (parent == root && !dir.is_empty()).then(|| name.to_string())
+        })),
+        Err(e) => tracing::warn!(error = %e, "vault discovery failed; folder links not listed"),
     }
-    out.sort();
-    out
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// [`vault_files`] restricted to `.md` notes (the whole-vault `localize` scope).

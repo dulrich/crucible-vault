@@ -118,6 +118,7 @@ impl Shared {
             .map_err(|e| rpc_err(error_codes::INVALID_PARAMS, e.to_string()))?;
         let id = self
             .writer_job(move |vw| {
+                vw.admit(&[&p.path])?;
                 if vw.fs().hash(&p.path)?.is_none() {
                     return Err(VaultError::NotFound(p.path).into());
                 }

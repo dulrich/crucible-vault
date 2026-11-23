@@ -94,16 +94,7 @@ pub(crate) fn find_in_subfolders(
     file_name: &str,
 ) -> Result<Option<String>, StepError> {
     let root = root.trim_matches('/');
-    let Ok(rd) = std::fs::read_dir(ctx.vault_root.join(root)) else {
-        return Ok(None);
-    };
-    let mut dirs: Vec<String> = rd
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
-    dirs.sort();
-    for d in dirs {
+    for d in super::util::child_dirs(ctx.vault_root, root) {
         let p = format!("{root}/{d}/{file_name}");
         if ctx.read(&p)?.is_some() {
             return Ok(Some(p));

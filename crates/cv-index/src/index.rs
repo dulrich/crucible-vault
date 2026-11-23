@@ -14,9 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, params};
-use walkdir::WalkDir;
-
+use crate::discovery::{Declined, Discovery, Ownership, discover};
 use crate::error::{Error, Result, io};
 use crate::extract::{self, Extracted, is_parsed_path, is_skipped_path};
 use crate::generation::{self as gen_files, generation_path, with_suffix};
@@ -24,6 +22,7 @@ use crate::ignore::IgnoreRules;
 use crate::query::Query;
 use crate::schema;
 use cv_text::resolver::{Resolver, file_key, normalize, target_key};
+use rusqlite::{Connection, OpenFlags, params};
 
 /// What [`Index::reconcile`] changed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -47,6 +46,11 @@ pub struct Index {
     /// The vault's `.gitignore` rules (WP-1, plan editor-ui-round-3); loaded on create/rebuild
     /// and by [`Index::load_ignore`] after [`Index::open`].
     ignore: IgnoreRules,
+    /// The folder-link ownership map of the last discovery (plan folder-links-follow Decision 5);
+    /// a path it declines never gets a row.
+    ownership: Ownership,
+    /// The vault root of the last discovery (`None` straight after [`Index::open`]).
+    root: Option<PathBuf>,
 }
 
 /// (folder, name, ext) of a vault path; `ext` lowercased, `name` without the extension.
@@ -96,12 +100,12 @@ fn insert_file(
     size: i64,
     mtime: i64,
     ctime: i64,
-    has_fm: bool,
+    loc: &str,
 ) -> Result<i64> {
     let (folder, name, ext) = split_path(path);
     tx.execute(
-        "INSERT INTO files(path, folder, name, ext, is_md, size, mtime, ctime, has_fm) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![path, folder, name, ext, is_parsed_path(path), size, mtime, ctime, has_fm],
+        "INSERT INTO files(path, folder, name, ext, is_md, size, mtime, ctime, has_fm, loc) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+        params![path, folder, name, ext, is_parsed_path(path), size, mtime, ctime, loc],
     )?;
     Ok(tx.last_insert_rowid())
 }
@@ -275,93 +279,61 @@ fn open_writer(base: &Path, generation: u64) -> Result<Connection> {
     Ok(conn)
 }
 
-/// One walked vault file: vault-relative path, full path, metadata (a symlink's target's).
-type WalkEntry = (String, PathBuf, std::fs::Metadata);
+/// The canonical location string a row records (`files.loc`).
+fn loc_of(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
 
-/// Every indexable file under `vault_root`, sorted by vault path: excluded directories (dot
-/// components, `.gitignore` matches) are pruned, never descended. The one walk `build` and
-/// [`Index::reconcile`] share. Stats only — no file is read.
-fn walk_vault(vault_root: &Path, rules: &IgnoreRules) -> Result<Vec<WalkEntry>> {
-    let mut entries: Vec<WalkEntry> = Vec::new();
-    let mut dangling = 0_usize;
-    let walker = WalkDir::new(vault_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            // Prunes excluded directories (never descended) and drops excluded files.
-            e.depth() == 0
-                || rel_path(vault_root, e.path())
-                    .is_none_or(|rel| !rules.is_excluded(&rel, e.file_type().is_dir()))
-        });
-    for entry in walker {
-        let entry = entry.map_err(|e| Error::Io {
-            path: e.path().map_or_else(
-                || vault_root.display().to_string(),
-                |p| p.display().to_string(),
-            ),
-            source: e.into(),
-        })?;
-        let ft = entry.file_type();
-        let md = if ft.is_file() {
-            entry.metadata().map_err(|e| Error::Io {
-                path: entry.path().display().to_string(),
-                source: e.into(),
-            })?
-        } else if ft.is_symlink() {
-            // A symlink to a regular file is indexed under its vault path with the target's
-            // metadata (plan editor-cutover-blockers WP-1); directory links stay unfollowed and a
-            // dangling link is skipped and counted.
-            match std::fs::metadata(entry.path()) {
-                Ok(m) if m.is_file() => m,
-                Ok(_) => continue,
-                Err(_) => {
-                    dangling += 1;
-                    continue;
-                }
-            }
-        } else {
-            continue;
-        };
-        let Some(rel) = rel_path(vault_root, entry.path()) else {
-            tracing::warn!("skipping a non-UTF-8 vault path");
-            continue;
-        };
-        entries.push((rel, entry.path().to_path_buf(), md));
-    }
-    if dangling > 0 {
-        tracing::info!(dangling, "skipped dangling symlinks while indexing");
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(entries)
+/// Drops the row `id` of a file that vanished between discovery and read (E2), inside `tx`:
+/// no row and no resolver entry stay behind; links already resolved to it re-resolve.
+fn drop_vanished(tx: &Connection, resolver: &mut Resolver, id: i64, path: &str) -> Result<()> {
+    delete_children(tx, id)?;
+    tx.execute("DELETE FROM files WHERE id = ?1", [id])?;
+    resolver.remove(id, path);
+    reresolve(
+        tx,
+        resolver,
+        "l.resolved_id = ?1 OR l.base_key = ?2",
+        params![id, file_key(path)],
+    )?;
+    Ok(())
 }
 
 /// Builds a complete index of `vault_root` at `building` in one transaction, then switches it to
 /// WAL and closes it.
-fn build(vault_root: &Path, building: &Path, generation: u64, rules: &IgnoreRules) -> Result<()> {
+/// The walk is [`discover`]'s (`disc`); a file that vanished before it is read leaves no row.
+fn build(building: &Path, generation: u64, disc: &Discovery) -> Result<()> {
     let mut conn = Connection::open(building)?;
     schema::configure_build(&conn)?;
     schema::create(&conn, generation)?;
-    let entries = walk_vault(vault_root, rules)?;
+    let entries = &disc.files;
 
     let tx = conn.transaction()?;
     let mut resolver = Resolver::default();
     let mut ids = Vec::with_capacity(entries.len());
     // Pass 1: every file is a link target before any link resolves.
-    for (rel, _, md) in &entries {
-        let (mtime, ctime) = file_times(md);
-        let size = i64::try_from(md.len()).unwrap_or(i64::MAX);
-        let id = insert_file(&tx, rel, size, mtime, ctime, false)?;
-        resolver.add(id, rel);
+    for f in entries {
+        let (mtime, ctime) = file_times(&f.meta);
+        let size = i64::try_from(f.meta.len()).unwrap_or(i64::MAX);
+        let id = insert_file(&tx, &f.path, size, mtime, ctime, &loc_of(&f.canonical))?;
+        resolver.add(id, &f.path);
         ids.push(id);
     }
     // Pass 2: parse notes.
-    for ((rel, full, _), id) in entries.iter().zip(&ids) {
-        if !is_parsed_path(rel) {
+    for (f, id) in entries.iter().zip(&ids) {
+        if !is_parsed_path(&f.path) {
             continue;
         }
-        let bytes = std::fs::read(full).map_err(|e| io(full, e))?;
-        if let Some(ex) = extract_bytes(rel, &bytes) {
-            write_children(&tx, *id, rel, &ex, &resolver)?;
+        let bytes = match std::fs::read(&f.full) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                drop_vanished(&tx, &mut resolver, *id, &f.path)?;
+                continue;
+            }
+            Err(e) => return Err(io(&f.full, e)),
+        };
+        if let Some(ex) = extract_bytes(&f.path, &bytes) {
+            write_children(&tx, *id, &f.path, &ex, &resolver)?;
         }
     }
     tx.commit()?;
@@ -382,14 +354,14 @@ fn remove_if_exists(p: &Path) -> Result<()> {
 
 /// Builds the next generation beside `base` and renames it into place; returns its number.
 /// On failure the `.building` files are removed and the current generation stays live.
-fn build_generation(vault_root: &Path, base: &Path, rules: &IgnoreRules) -> Result<u64> {
+fn build_generation(base: &Path, disc: &Discovery) -> Result<u64> {
     let generation = gen_files::next(&gen_files::scan(base)?);
     let fin = generation_path(base, generation);
     let building = with_suffix(&fin, ".building");
     for s in SIDE_FILES {
         remove_if_exists(&with_suffix(&building, s))?;
     }
-    let res = build(vault_root, &building, generation, rules).and_then(|()| {
+    let res = build(&building, generation, disc).and_then(|()| {
         let wal = with_suffix(&building, "-wal");
         if wal.exists() {
             return Err(Error::JournalMode(format!(
@@ -429,19 +401,35 @@ impl Index {
             .find(|&g| g < generation);
         let keep: Vec<u64> = std::iter::once(generation).chain(prev).collect();
         gen_files::sweep(base, &keep)?;
-        Self::open_generation(base, generation, IgnoreRules::default())
+        Self::open_generation(base, generation, None)
     }
 
-    fn open_generation(base: &Path, generation: u64, ignore: IgnoreRules) -> Result<Self> {
+    fn open_generation(
+        base: &Path,
+        generation: u64,
+        disc: Option<(&Path, Discovery)>,
+    ) -> Result<Self> {
         let conn = open_writer(base, generation)?;
         let resolver = load_resolver(&conn)?;
-        Ok(Self {
+        let mut index = Self {
             conn,
             base: base.to_path_buf(),
             generation,
             resolver,
-            ignore,
-        })
+            ignore: IgnoreRules::default(),
+            ownership: Ownership::default(),
+            root: None,
+        };
+        if let Some((root, d)) = disc {
+            index.set_discovery(root, d);
+        }
+        Ok(index)
+    }
+
+    fn set_discovery(&mut self, root: &Path, d: Discovery) {
+        self.ignore = d.rules;
+        self.ownership = d.ownership;
+        self.root = Some(root.to_path_buf());
     }
 
     /// Builds the next generation of `vault_root` beside `base` and opens it. The previous valid
@@ -450,9 +438,9 @@ impl Index {
         let entries = gen_files::scan(base)?;
         let prev = gen_files::current_in(base, &entries);
         gen_files::sweep(base, &prev.into_iter().collect::<Vec<_>>())?;
-        let rules = IgnoreRules::load(vault_root);
-        let generation = build_generation(vault_root, base, &rules)?;
-        let index = Self::open_generation(base, generation, rules)?;
+        let disc = discover(vault_root)?;
+        let generation = build_generation(base, &disc)?;
+        let index = Self::open_generation(base, generation, Some((vault_root, disc)))?;
         let keep: Vec<u64> = std::iter::once(generation).chain(prev).collect();
         gen_files::sweep(base, &keep)?;
         Ok(index)
@@ -463,9 +451,9 @@ impl Index {
     /// except `g` and the outgoing one. A failed build leaves the current generation live.
     /// Returns `g`.
     pub fn rebuild(&mut self, vault_root: &Path) -> Result<u64> {
-        let rules = IgnoreRules::load(vault_root);
-        let generation = build_generation(vault_root, &self.base, &rules)?;
-        let fresh = Self::open_generation(&self.base, generation, rules)?;
+        let disc = discover(vault_root)?;
+        let generation = build_generation(&self.base, &disc)?;
+        let fresh = Self::open_generation(&self.base, generation, Some((vault_root, disc)))?;
         let old = std::mem::replace(self, fresh);
         let outgoing = old.generation;
         // PASSIVE, never TRUNCATE/RESTART: those invoke the busy handler and would let a reader
@@ -486,10 +474,31 @@ impl Index {
         Ok(generation)
     }
 
-    /// (Re)loads the vault's `.gitignore` rules for incremental updates (call after
-    /// [`Index::open`], which has no vault root; create/rebuild load them themselves).
+    /// (Re)loads the vault's `.gitignore` rules and folder-link ownership for incremental updates
+    /// (call after [`Index::open`], which has no vault root; create/rebuild/reconcile load them
+    /// themselves). A failed walk keeps the previous rules and ownership (logged).
     pub fn load_ignore(&mut self, vault_root: &Path) {
-        self.ignore = IgnoreRules::load(vault_root);
+        match discover(vault_root) {
+            Ok(d) => self.set_discovery(vault_root, d),
+            Err(e) => tracing::warn!(error = %e, "vault discovery failed; rules kept"),
+        }
+    }
+
+    /// The folder-link ownership map of the last discovery (Decision 5).
+    pub fn ownership(&self) -> &Ownership {
+        &self.ownership
+    }
+
+    /// Replaces the rules and ownership with a fresh discovery of `vault_root` (the WP-2b
+    /// recompute seam).
+    pub fn refresh_discovery(&mut self, vault_root: &Path, d: Discovery) {
+        self.set_discovery(vault_root, d);
+    }
+
+    /// The writer's admission rule ([`Ownership::admit`]): `Err` for a path reached through a
+    /// losing alias, loop or dangling link.
+    pub fn admit(&self, path: &str) -> std::result::Result<(), Declined> {
+        self.ownership.admit(path)
     }
 
     /// Brings a reopened generation in line with `vault_root` on disk, in place (the generation
@@ -498,23 +507,48 @@ impl Index {
     /// is no longer an indexable file. Unchanged files are only stat'ed, never read. Uses the
     /// rules from [`Index::load_ignore`]; call it after that. Emits nothing — callers decide.
     pub fn reconcile(&mut self, vault_root: &Path) -> Result<ReconcileCounts> {
-        let entries = walk_vault(vault_root, &self.ignore)?;
-        let mut rows: std::collections::HashMap<String, (i64, i64)> = Query::new(&self.conn)
-            .file_stats()?
-            .into_iter()
-            .map(|(path, size, mtime)| (path, (size, mtime)))
-            .collect();
+        let disc = discover(vault_root)?;
+        self.reconcile_with(vault_root, disc)
+    }
+
+    /// [`Index::reconcile`] over an already-walked `disc`. A row is fresh only when its
+    /// `(size, mtime, loc)` all match, so a folder-link retarget onto an equal-stat file reindexes
+    /// (schema v3). A file that vanished before it is read is treated as gone (E2).
+    fn reconcile_with(&mut self, vault_root: &Path, disc: Discovery) -> Result<ReconcileCounts> {
+        let mut disc = disc;
+        let entries = std::mem::take(&mut disc.files);
+        self.set_discovery(vault_root, disc);
+        let mut rows: std::collections::HashMap<String, (i64, i64, String)> =
+            Query::new(&self.conn)
+                .file_stats()?
+                .into_iter()
+                .map(|(path, size, mtime, loc)| (path, (size, mtime, loc)))
+                .collect();
         let mut counts = ReconcileCounts::default();
-        for (rel, full, md) in &entries {
-            let (mtime, ctime) = file_times(md);
-            let size = i64::try_from(md.len()).unwrap_or(i64::MAX);
-            let known = rows.remove(rel);
-            if known == Some((size, mtime)) {
+        let mut gone: Vec<String> = Vec::new();
+        for f in &entries {
+            let (mtime, ctime) = file_times(&f.meta);
+            let size = i64::try_from(f.meta.len()).unwrap_or(i64::MAX);
+            let loc = loc_of(&f.canonical);
+            let known = rows.remove(&f.path);
+            if known.as_ref() == Some(&(size, mtime, loc.clone())) {
                 counts.unchanged += 1;
                 continue;
             }
-            let bytes = std::fs::read(full).map_err(|e| io(full, e))?;
-            if self.upsert_file(rel, &bytes, mtime, ctime)?.is_some() {
+            let bytes = match std::fs::read(&f.full) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if known.is_some() {
+                        gone.push(f.path.clone());
+                    }
+                    continue;
+                }
+                Err(e) => return Err(io(&f.full, e)),
+            };
+            if self
+                .upsert_at(&f.path, &bytes, mtime, ctime, &loc)?
+                .is_some()
+            {
                 if known.is_some() {
                     counts.updated += 1;
                 } else {
@@ -523,7 +557,7 @@ impl Index {
             }
         }
         // Whatever is left has no indexable file on disk any more.
-        let mut gone: Vec<String> = rows.into_keys().collect();
+        gone.extend(rows.into_keys());
         gone.sort();
         for path in gone {
             if self.remove_file(&path)? {
@@ -537,6 +571,15 @@ impl Index {
     /// match (or under an excluded directory).
     pub fn is_excluded(&self, path: &str) -> bool {
         is_skipped_path(path) || self.ignore.is_excluded(path, false)
+    }
+
+    /// The canonical location of `path` under the last discovery's root (`""` when unknown).
+    fn location(&self, path: &str) -> String {
+        self.root
+            .as_ref()
+            .and_then(|r| std::fs::canonicalize(r.join(path)).ok())
+            .map(|c| loc_of(&c))
+            .unwrap_or_default()
     }
 
     /// The current generation's file.
@@ -566,8 +609,8 @@ impl Index {
 
     /// Indexes `path` with content `bytes` (one transaction). A new file re-resolves every link
     /// whose basename could now land on it; a modified file keeps its id and rewrites its rows.
-    /// Returns the file id, or `None` for an excluded path ([`Index::is_excluded`]; a stale row
-    /// for it is dropped).
+    /// Returns the file id, or `None` for an excluded path ([`Index::is_excluded`]) or one the
+    /// ownership map declines ([`Index::admit`]); a stale row for it is dropped.
     pub fn upsert_file(
         &mut self,
         path: &str,
@@ -576,7 +619,20 @@ impl Index {
         ctime: i64,
     ) -> Result<Option<i64>> {
         check_path(path)?;
-        if self.is_excluded(path) {
+        let loc = self.location(path);
+        self.upsert_at(path, bytes, mtime, ctime, &loc)
+    }
+
+    fn upsert_at(
+        &mut self,
+        path: &str,
+        bytes: &[u8],
+        mtime: i64,
+        ctime: i64,
+        loc: &str,
+    ) -> Result<Option<i64>> {
+        check_path(path)?;
+        if self.is_excluded(path) || self.admit(path).is_err() {
             self.remove_file(path)?;
             return Ok(None);
         }
@@ -587,14 +643,14 @@ impl Index {
         let id = match existing {
             Some(id) => {
                 tx.execute(
-                    "UPDATE files SET size = ?2, mtime = ?3, ctime = ?4, has_fm = 0 WHERE id = ?1",
-                    params![id, size, mtime, ctime],
+                    "UPDATE files SET size = ?2, mtime = ?3, ctime = ?4, has_fm = 0, loc = ?5 WHERE id = ?1",
+                    params![id, size, mtime, ctime, loc],
                 )?;
                 delete_children(&tx, id)?;
                 id
             }
             None => {
-                let id = insert_file(&tx, path, size, mtime, ctime, false)?;
+                let id = insert_file(&tx, path, size, mtime, ctime, loc)?;
                 self.resolver.add(id, path);
                 id
             }
@@ -656,10 +712,11 @@ impl Index {
         if is_skipped_path(to) {
             return Err(Error::InvalidPath(to.to_string()));
         }
-        if self.is_excluded(to) {
+        if self.is_excluded(to) || self.admit(to).is_err() {
             self.remove_file(from)?;
             return Err(Error::NotFound(from.to_string()));
         }
+        let loc = self.location(to);
         let tx = self.conn.transaction()?;
         let id = file_id(&tx, from)?.ok_or_else(|| Error::NotFound(from.to_string()))?;
         if file_id(&tx, to)?.is_some() {
@@ -667,8 +724,8 @@ impl Index {
         }
         let (folder, name, ext) = split_path(to);
         tx.execute(
-            "UPDATE files SET path = ?2, folder = ?3, name = ?4, ext = ?5, is_md = ?6 WHERE id = ?1",
-            params![id, to, folder, name, ext, is_parsed_path(to)],
+            "UPDATE files SET path = ?2, folder = ?3, name = ?4, ext = ?5, is_md = ?6, loc = ?7 WHERE id = ?1",
+            params![id, to, folder, name, ext, is_parsed_path(to), loc],
         )?;
         if is_parsed_path(from) != is_parsed_path(to) {
             delete_children(&tx, id)?;
@@ -689,5 +746,63 @@ impl Index {
             return Err(e);
         }
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// A vault with `a.md` linking to `ext/gone.md` through the folder link `l`.
+    fn fixture() -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let vault = d.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(d.path().join("ext")).unwrap();
+        std::fs::write(vault.join("a.md"), "[[gone]]\n").unwrap();
+        std::fs::write(d.path().join("ext/gone.md"), "# gone\n").unwrap();
+        symlink(d.path().join("ext"), vault.join("l")).unwrap();
+        (d, vault)
+    }
+
+    #[test]
+    fn e2_target_vanishing_after_discovery_leaves_no_row_or_resolver_entry() {
+        let (d, vault) = fixture();
+        let base = d.path().join("index.db");
+        // Build: discovered, then the linked target disappears before it is read.
+        let disc = discover(&vault).unwrap();
+        assert!(disc.files.iter().any(|f| f.path == "l/gone.md"));
+        std::fs::remove_file(d.path().join("ext/gone.md")).unwrap();
+        let g = build_generation(&base, &disc).unwrap();
+        let mut idx = Index::open_generation(&base, g, Some((&vault, disc))).unwrap();
+        assert!(idx.query().file("l/gone.md").unwrap().is_none());
+        assert_eq!(idx.resolver().resolve("a.md", 0, "gone"), None);
+        let a = idx.query().outgoing("a.md").unwrap();
+        assert!(a.iter().all(|l| l.resolved_path.is_none()));
+        // Reconcile: a row exists, the target reappears for the walk, vanishes before the read.
+        std::fs::write(d.path().join("ext/gone.md"), "# back, longer\n").unwrap();
+        idx.reconcile(&vault).unwrap();
+        assert!(idx.query().file("l/gone.md").unwrap().is_some());
+        std::fs::write(d.path().join("ext/gone.md"), "# changed again, longer\n").unwrap();
+        let disc = discover(&vault).unwrap();
+        std::fs::remove_file(d.path().join("ext/gone.md")).unwrap();
+        let c = idx.reconcile_with(&vault, disc).unwrap();
+        assert_eq!(c.removed, 1);
+        assert!(idx.query().file("l/gone.md").unwrap().is_none());
+        assert_eq!(idx.resolver().resolve("a.md", 0, "gone"), None);
+    }
+
+    #[test]
+    fn e2_unrelated_read_failures_still_surface() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, vault) = fixture();
+        let p = d.path().join("ext/gone.md");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            return; // running as root: permissions are not enforced
+        }
+        let r = Index::create(&vault, &d.path().join("index.db"));
+        assert!(matches!(r, Err(Error::Io { .. })), "{:?}", r.err());
     }
 }

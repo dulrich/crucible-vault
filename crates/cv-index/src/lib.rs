@@ -16,6 +16,7 @@
 //!
 //! Pure and sync: no async runtime (AGENTS.md → Stack).
 
+mod discovery;
 mod error;
 mod extract;
 mod generation;
@@ -26,6 +27,10 @@ mod query;
 mod schema;
 
 pub use cv_text::resolver::Resolver;
+pub use discovery::{
+    Declined, DiscoveredFile, Discovery, Ownership, SkipCounts, SkipReason, discover,
+    discover_listing,
+};
 pub use error::{Error, Result};
 pub use extract::{is_parsed_path, is_skipped_path, is_target_only_path, note_tags};
 pub use generation::{current_generation, generation_path};

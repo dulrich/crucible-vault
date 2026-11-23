@@ -28,9 +28,9 @@ pub(crate) fn rpc_from_vault(e: VaultError) -> RpcError {
         e @ (VaultError::InvalidPath(_) | VaultError::Exists(_)) => {
             rpc_err(c::INVALID_PARAMS, e.to_string())
         }
-        e @ (VaultError::LinkWriteRefused { .. } | VaultError::AutomationSkipped { .. }) => {
-            rpc_err(c::REFUSED, e.to_string())
-        }
+        e @ (VaultError::LinkWriteRefused { .. }
+        | VaultError::AutomationSkipped { .. }
+        | VaultError::Declined(_)) => rpc_err(c::REFUSED, e.to_string()),
         e @ VaultError::WriterGone => rpc_err(c::UNAVAILABLE, e.to_string()),
         e @ (VaultError::Io { .. }
         | VaultError::Index(_)

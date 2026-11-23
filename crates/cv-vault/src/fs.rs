@@ -3,7 +3,6 @@
 //! It reads and writes the vault root. Writes through a symlinked note land on its target only
 //! when that target lies under the vault root or an allowlisted link-write root.
 
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -45,8 +44,7 @@ fn read_opt(full: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// A regular file, or a symlink resolving to one (directory links are never followed and dangling
-/// links are skipped: the cv-index walk policy).
+/// A regular file, or a symlink resolving to one (dangling links are skipped).
 pub(crate) fn is_file_or_file_link(entry: &walkdir::DirEntry) -> bool {
     let ft = entry.file_type();
     ft.is_file() || (ft.is_symlink() && entry.path().is_file())
@@ -490,32 +488,26 @@ impl VaultFs {
     }
 
     /// Every vault file under folder `dir` (`""` = whole vault), skipping ignored paths. Sorted.
+    /// Filters the vault-wide discovery ([`cv_index::discover_listing`], plan folder-links-follow
+    /// Decision 5): folder links are followed with one owner per canonical directory, so a losing
+    /// alias or loop is never listed; `.gitignore`d files are still listed (only
+    /// [`is_ignored`] paths are skipped).
     pub fn list_files(&self, dir: &str) -> Result<Vec<String>> {
-        let mut out = BTreeSet::new();
-        let base = &self.root;
         let start = if dir.is_empty() {
-            base.clone()
+            self.root.clone()
         } else {
-            base.join(dir)
+            self.root.join(dir)
         };
         if !start.is_dir() {
             return Ok(Vec::new());
         }
-        for entry in walkdir::WalkDir::new(&start) {
-            let entry = entry.map_err(|e| VaultError::Io {
-                path: start.display().to_string(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
-            if !is_file_or_file_link(&entry) {
-                continue;
-            }
-            if let Some(rel) = cv_index::rel_path(base, entry.path())
-                && !is_ignored(&rel)
-            {
-                out.insert(rel);
-            }
-        }
-        Ok(out.into_iter().collect())
+        let prefix = format!("{dir}/");
+        let d = cv_index::discover_listing(&self.root, &is_ignored)?;
+        Ok(d.files
+            .into_iter()
+            .map(|f| f.path)
+            .filter(|p| (dir.is_empty() || p.starts_with(&prefix)) && !is_ignored(p))
+            .collect())
     }
 }
 
@@ -563,5 +555,30 @@ mod tests {
         std::fs::write(d.path().join(".trash/f/a.md"), "").unwrap();
         assert_eq!(fs.trash_slot("f/a.md"), ".trash/f/a (1).md");
         assert_eq!(fs.trash_slot("noext"), ".trash/noext");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    /// Plan folder-links-follow Decision 5: `list_files` agrees with the index walk — linked files
+    /// listed under the owning alias only, a loop never listed, `.gitignore`d files kept.
+    #[test]
+    fn list_files_follows_folder_links_with_one_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let vault = d.path().join("vault");
+        let ext = d.path().join("ext");
+        std::fs::create_dir_all(vault.join("n")).unwrap();
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("s.md"), "s").unwrap();
+        std::fs::write(vault.join("n/ign.md"), "i").unwrap();
+        std::fs::write(vault.join(".gitignore"), "ign.md\n").unwrap();
+        std::os::unix::fs::symlink(&ext, vault.join("n/a")).unwrap();
+        std::os::unix::fs::symlink(&ext, vault.join("n/b")).unwrap();
+        std::os::unix::fs::symlink(&vault, vault.join("n/loop")).unwrap();
+        let fs = VaultFs::live(&vault).unwrap();
+        assert_eq!(fs.list_files("n").unwrap(), vec!["n/a/s.md", "n/ign.md"]);
+        assert_eq!(fs.list_files("n/b").unwrap(), Vec::<String>::new());
     }
 }

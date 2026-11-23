@@ -149,3 +149,49 @@ fn install_keeps_a_gitignored_existing_file_live() {
         }
     );
 }
+
+/// Plan folder-links-follow Decision 5 (cycle-1 B3): with `a` and `b` both linking one external
+/// folder, `a` owns it. A pre-existing id at the losing alias moves to the owner when the owner
+/// has none, else retires; `bind_note` and a write through the alias are declined.
+#[test]
+fn install_moves_or_retires_alias_ids_and_aliases_are_declined() {
+    let env = Env::new();
+    let ext = env.vault.parent().unwrap().join("ext");
+    std::fs::create_dir_all(&ext).unwrap();
+    std::fs::write(ext.join("x.md"), "X").unwrap();
+    std::fs::write(ext.join("y.md"), "Y").unwrap();
+    std::os::unix::fs::symlink(&ext, env.vault.join("a")).unwrap();
+    std::os::unix::fs::symlink(&ext, env.vault.join("b")).unwrap();
+    let (x, y_owner, y_alias) = {
+        let mut db = StateDb::open(&env.state, 1, QueueConfig::default()).unwrap();
+        (
+            db.note_id_bind("b/x.md").unwrap(),
+            db.note_id_bind("a/y.md").unwrap(),
+            db.note_id_bind("b/y.md").unwrap(),
+        )
+    };
+    let (wh, _rx) = env.start();
+    assert_eq!(
+        wh.locate_note(x).unwrap(),
+        NoteLocation::Live {
+            path: "a/x.md".into()
+        }
+    );
+    assert_eq!(
+        wh.locate_note(y_owner).unwrap(),
+        NoteLocation::Live {
+            path: "a/y.md".into()
+        }
+    );
+    assert_eq!(
+        wh.locate_note(y_alias).unwrap(),
+        NoteLocation::Gone { replaced_by: None }
+    );
+    assert!(wh.bind_note("b/x.md").is_err());
+    assert_eq!(wh.bind_note("a/x.md").unwrap(), x);
+    let w = wh
+        .call(|w| w.write("b/x.md", b"changed", Some(hash("X"))))
+        .unwrap();
+    assert!(matches!(w, Err(cv_vault::VaultError::Declined(_))), "{w:?}");
+    assert_eq!(std::fs::read(ext.join("x.md")).unwrap(), b"X");
+}

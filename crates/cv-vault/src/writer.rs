@@ -100,7 +100,7 @@ impl VaultWriter {
     pub fn open(fs: VaultFs, index_base: &Path, ids: Box<dyn NoteIdSink>) -> Result<Self> {
         let index = match Index::open(index_base) {
             Ok(mut i) => {
-                i.load_ignore(fs.root());
+                // Reconcile loads the `.gitignore` rules and folder-link ownership itself.
                 // Catch up with changes made while the daemon was stopped (I4: no events).
                 let started = std::time::Instant::now();
                 match i.reconcile(fs.root()) {
@@ -214,8 +214,23 @@ impl VaultWriter {
     /// The id of the file at `path`, minted if it has none. Runs on the writer thread, so it
     /// observes every mutation that returned before it (plan note-identity D2 `bind_note`; call
     /// through [`crate::WriterHandle::bind_note`]).
+    /// A path the ownership map declines (a losing alias, loop or dangling link, Decision 5) is
+    /// never bound.
     pub fn bind_note(&mut self, path: &str) -> IdResult<NoteId> {
+        self.index
+            .admit(path)
+            .map_err(|d| crate::note_id::NoteIdError(d.to_string()))?;
         self.ids.bind(path)
+    }
+
+    /// Decision 5's admission rule over `paths`: [`VaultError::Declined`] for the first path
+    /// reached through a losing alias, loop or dangling link. Checked before every mutation, so
+    /// an alias never gets a file write, an index row or a note id.
+    pub fn admit(&self, paths: &[&str]) -> Result<()> {
+        for p in paths {
+            self.index.admit(p)?;
+        }
+        Ok(())
     }
 
     /// Where `id` is now; writer-thread ordered like [`Self::bind_note`].
@@ -260,6 +275,7 @@ impl VaultWriter {
 
     /// Bumps `path`'s mtime to now, confined like a write (the attachment-reuse touch).
     pub fn touch(&mut self, path: &str) -> Result<()> {
+        self.admit(&[path])?;
         self.fs.touch(path)
     }
 
@@ -293,6 +309,7 @@ impl VaultWriter {
         } else {
             EventKind::Modified
         };
+        self.admit(&[path])?;
         let (h, full) = self.fs.put(path, bytes, expected.as_ref())?;
         self.index_written(path, bytes, &full, &h);
         // Decision 4: a binding failure is reported after the event (the file is written and
@@ -370,6 +387,7 @@ impl VaultWriter {
         replaced_by: Option<&str>,
     ) -> Result<()> {
         validate_rel_path(path)?;
+        self.admit(&[path])?;
         self.automation_guard(&[path])?;
         if let Some(moved) = self.fs.remove_with(path, &expected, permanent)? {
             let trashed_ms = std::time::SystemTime::now()
@@ -481,6 +499,7 @@ impl VaultWriter {
         if self.fs.read(to)?.is_some() {
             return Err(VaultError::Exists(to.to_string()));
         }
+        self.admit(&[from, to])?;
         self.automation_guard(&[from, to])?;
         let mut groups = self.backlink_groups(from)?;
         // The moved note's own folder-relative outgoing links (to other files) are rebased onto
@@ -619,6 +638,7 @@ impl VaultWriter {
     pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<RenameOutcome> {
         validate_rel_path(from)?;
         validate_rel_path(to)?;
+        self.admit(&[from, to])?;
         // Decision 4: a folder rename never moves a file through a link, at the source (the
         // folder itself, or a folder link anywhere under it) or the destination.
         let refuse = |path: &str, reason: &str| VaultError::LinkWriteRefused {

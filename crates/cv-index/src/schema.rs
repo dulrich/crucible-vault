@@ -7,11 +7,13 @@ use crate::error::{Error, Result};
 
 /// The `index.db` schema version, carried by the `hello` handshake (`plans/v0-core-daemon.md`
 /// Public Interfaces) so a stale client fails loudly.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Tables per S2 (`FINDINGS.md` "Index design") plus WP-5's additions: `files.ctime`, link
 /// line/span, `tasks`. Every child table carries a `file_id` index — S2 measured a 4× full-index
-/// slowdown without them (O(n²) per-file deletes).
+/// slowdown without them (O(n²) per-file deletes). v3 (plan folder-links-follow WP-2a):
+/// `files.loc`, the file's canonical location, so reconcile reindexes a folder-link retarget whose
+/// `(size, mtime)` is unchanged.
 const DDL: &str = "
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE files(
@@ -24,7 +26,8 @@ CREATE TABLE files(
   size INTEGER NOT NULL,
   mtime INTEGER NOT NULL,
   ctime INTEGER NOT NULL,
-  has_fm INTEGER NOT NULL
+  has_fm INTEGER NOT NULL,
+  loc TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX files_folder ON files(folder);
 CREATE TABLE props(file_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL);

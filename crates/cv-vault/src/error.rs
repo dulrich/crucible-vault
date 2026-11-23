@@ -33,6 +33,11 @@ pub enum VaultError {
     /// move or deletion. Only raised inside [`crate::VaultWriter::automation`] scopes.
     #[error("automation skipped {path}: its canonical location is outside the vault root")]
     AutomationSkipped { path: String },
+    /// Decision 5 (plan folder-links-follow): `path` is reached through a losing folder-link
+    /// alias, a loop or a dangling link, so it is not the owning vault path of its location.
+    /// Nothing was touched (no file, index row or note id); address the owning path instead.
+    #[error("declined: {0}")]
+    Declined(#[from] cv_index::Declined),
     #[error("io at {path}: {source}")]
     Io {
         path: String,

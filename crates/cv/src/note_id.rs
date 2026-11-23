@@ -98,7 +98,8 @@ pub fn install(writer: &VaultWriter, state: &Arc<Mutex<StateDb>>) {
     repair(&mut db, writer, now);
 }
 
-/// Retires each live id row whose file is absent, exactly as a delete seen while running
+/// Moves or retires each live id row at a declined (alias) path (see the loop), then retires each
+/// live id row whose file is absent, exactly as a delete seen while running
 /// (`note_id_retire`; the tombstone then ages out under the normal retention). The index's file
 /// set is only a fast positive check — it omits `.gitignore`d files that exist and can be bound
 /// (audit F1) — so every other row is confirmed `NotFound` on the filesystem first; an inspection
@@ -120,7 +121,36 @@ fn repair(db: &mut StateDb, writer: &VaultWriter, now: i64) {
     };
     let root = writer.fs().root();
     let mut retired = 0usize;
+    let (mut moved, mut alias_retired) = (0usize, 0usize);
+    let mut live_set: std::collections::HashSet<String> = live.iter().cloned().collect();
     for path in live {
+        // Decision 5 (plan folder-links-follow): an id at a path the ownership map declines (a
+        // losing alias, loop or dangling link) moves to the owning path when that has no live
+        // id, else retires — an alias never keeps an id.
+        if writer.index().admit(&path).is_err() {
+            let winner = writer
+                .index()
+                .ownership()
+                .winner_of(&path)
+                .filter(|w| !live_set.contains(w));
+            let res = match &winner {
+                Some(w) => db.note_id_move(&path, w, now).map(|_| true),
+                None => db.note_id_retire(&path, None, now).map(|_| false),
+            };
+            match res {
+                Ok(true) => {
+                    moved += 1;
+                    live_set.remove(&path);
+                    live_set.extend(winner);
+                }
+                Ok(false) => {
+                    alias_retired += 1;
+                    live_set.remove(&path);
+                }
+                Err(e) => tracing::warn!(error = %e, "note id repair: alias row not repaired"),
+            }
+            continue;
+        }
         if indexed.contains(&path) {
             continue;
         }
@@ -134,6 +164,13 @@ fn repair(db: &mut StateDb, writer: &VaultWriter, now: i64) {
             }
             Err(e) => tracing::warn!(error = %e, "note id repair: cannot inspect a file; row kept"),
         }
+    }
+    if moved + alias_retired > 0 {
+        tracing::info!(
+            moved,
+            retired = alias_retired,
+            "note id repair: ids at folder-link alias paths moved to the owning path or retired"
+        );
     }
     if retired > 0 {
         tracing::info!(retired, "note id repair: retired rows whose file is absent");

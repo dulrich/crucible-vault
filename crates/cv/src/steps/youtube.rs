@@ -417,16 +417,7 @@ fn find_about(
     root: &str,
     channel_id: &str,
 ) -> Result<Option<(String, Option<i64>)>, StepError> {
-    let Ok(rd) = std::fs::read_dir(ctx.vault_root.join(root)) else {
-        return Ok(None);
-    };
-    let mut dirs: Vec<String> = rd
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
-    dirs.sort();
-    for d in dirs {
+    for d in super::util::child_dirs(ctx.vault_root, root) {
         let p = format!("{root}/{d}/about.md");
         let Some((bytes, _)) = ctx.read(&p)? else {
             continue;

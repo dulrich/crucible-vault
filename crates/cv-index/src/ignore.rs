@@ -11,8 +11,6 @@
 
 use std::path::Path;
 
-use walkdir::WalkDir;
-
 /// The file name whose patterns exclude paths from the index.
 pub const GITIGNORE: &str = ".gitignore";
 
@@ -184,31 +182,17 @@ impl IgnoreRules {
     }
 
     /// Loads every `.gitignore` in the vault tree under `root`, never descending into excluded
-    /// directories. Unreadable files are skipped with a warning.
+    /// directories and following folder links like the index walk ([`crate::discover`], Decision
+    /// 5 of plan folder-links-follow). Unreadable files are skipped with a warning; a failed walk
+    /// yields no rules (logged).
     pub fn load(root: &Path) -> Self {
-        let mut rules = Self::default();
-        let mut it = WalkDir::new(root).follow_links(false).into_iter();
-        while let Some(entry) = it.next() {
-            let Ok(entry) = entry else { continue };
-            if !entry.file_type().is_dir() {
-                continue;
-            }
-            let Some(rel) = rel_of(root, entry.path()) else {
-                it.skip_current_dir();
-                continue;
-            };
-            if !rel.is_empty() && rules.is_excluded(&rel, true) {
-                it.skip_current_dir();
-                continue;
-            }
-            let file = entry.path().join(GITIGNORE);
-            match std::fs::read_to_string(&file) {
-                Ok(text) => rules.add(&rel, &text),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!(error = %e, "reading a vault .gitignore"),
+        match crate::discovery::discover(root) {
+            Ok(d) => d.rules,
+            Err(e) => {
+                tracing::warn!(error = %e, "loading the vault .gitignore rules failed");
+                Self::default()
             }
         }
-        rules
     }
 
     /// Whether vault path `path` (a directory when `is_dir`) is excluded from the index: a
@@ -253,12 +237,6 @@ impl IgnoreRules {
 /// `path` is a `.gitignore` file (at any depth).
 pub fn is_gitignore_path(path: &str) -> bool {
     path.rsplit('/').next() == Some(GITIGNORE)
-}
-
-fn rel_of(root: &Path, p: &Path) -> Option<String> {
-    let rel = p.strip_prefix(root).ok()?;
-    let s = rel.to_str()?;
-    Some(s.replace(std::path::MAIN_SEPARATOR, "/"))
 }
 
 #[cfg(test)]

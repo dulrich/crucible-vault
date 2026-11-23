@@ -622,20 +622,21 @@ fn symlinked_note_outside_the_root_is_indexed_under_its_vault_path() {
         t.vault().join("initiatives/x/INITIATIVE.md"),
     )
     .unwrap();
-    // A dangling link is skipped (not an error); a directory link is not followed.
+    // A dangling link is skipped (not an error); a folder link is followed (plan
+    // folder-links-follow Decision 5) and its files indexed under the link's vault path.
     std::os::unix::fs::symlink(repo.join("gone.md"), t.vault().join("dangling.md")).unwrap();
     std::fs::write(repo.join("sub/inner.md"), "inner").unwrap();
     std::os::unix::fs::symlink(repo.join("sub"), t.vault().join("dirlink")).unwrap();
 
     let idx = Index::create(&t.vault(), &t.db()).unwrap();
     let q = idx.query();
-    assert_eq!(q.file_count().unwrap(), 2);
+    assert_eq!(q.file_count().unwrap(), 3);
     assert!(q.file("initiatives/x/INITIATIVE.md").unwrap().is_some());
     assert_eq!(q.tags_of("initiatives/x/INITIATIVE.md").unwrap().len(), 1);
     assert_eq!(q.props("initiatives/x/INITIATIVE.md").unwrap().len(), 1);
     assert_eq!(q.backlinks("a.md").unwrap().len(), 1);
     assert!(q.file("dangling.md").unwrap().is_none());
-    assert!(q.file("dirlink/inner.md").unwrap().is_none());
+    assert!(q.file("dirlink/inner.md").unwrap().is_some());
 }
 
 #[test]
