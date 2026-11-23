@@ -11,6 +11,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Editor: a text selection in Reading is no longer cleared when another file in the vault is created, deleted or renamed (for example when intake files a new note or saves an attachment). The selection is kept whenever the note's displayed text is unchanged by the refresh.
+- Editor: opening a binary file with an unrecognised extension (for example a `.pgm` screenshot) no longer hangs the editor by loading it into a text tab. A file whose first 8 KiB is not valid UTF-8 now goes to the system opener, as one containing a NUL byte already did, and the PNM family (`pgm`, `ppm`, `pbm`, `pnm`, `pam`) plus `tga`, `qoi`, `exr`, `hdr`, `dds` and `jxl` are known external formats.
 
 ## 1.3.0 — 2026-11-21
 

@@ -6,7 +6,7 @@
 //! WP-3); the image formats it cannot decode
 //! (`svg`, `avif`) and known binary/media/archive/office formats are [`FileKind::External`]. An
 //! extensionless path is `Text` (a note link target); an unknown extension is `Text` unless
-//! [`sniff`] finds a NUL byte in its first [`SNIFF_LEN`] bytes.
+//! [`sniff`] finds a NUL byte or invalid UTF-8 in its first [`SNIFF_LEN`] bytes.
 
 /// What opening a file does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +36,8 @@ pub const EXTERNAL_EXTS: &[&str] = &[
     // Documents the editor cannot render.
     "epub", "djvu", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
     // Images it does not decode.
-    "svg", "avif", "heic", "heif", "tif", "tiff", "ico", "psd", "xcf", "raw", "cr2", "nef",
+    "svg", "avif", "heic", "heif", "tif", "tiff", "ico", "psd", "xcf", "raw", "cr2", "nef", "pgm",
+    "ppm", "pbm", "pnm", "pam", "tga", "qoi", "exr", "hdr", "dds", "jxl",
     // Audio / video.
     "mp3", "m4a", "wav", "flac", "ogg", "oga", "opus", "aac", "webm", "mp4", "m4v", "mkv", "mov",
     "avi", "3gp", // Archives / binaries / fonts / databases.
@@ -73,10 +74,14 @@ pub fn by_extension(path: &str) -> Option<FileKind> {
     }
 }
 
-/// The unknown-extension fallback: `External` when a NUL byte occurs in the first
-/// [`SNIFF_LEN`] bytes of `head`, else `Text`.
+/// The unknown-extension fallback: `External` when the first [`SNIFF_LEN`] bytes of `head`
+/// hold a NUL byte or are not UTF-8 (a multi-byte character cut off at the window end is
+/// fine), else `Text`. Binary formats with long NUL-free runs (a white-topped `P5` PGM is all
+/// `0xFF`) fail the UTF-8 check; loading one into a text buffer pins the UI thread.
 pub fn sniff(head: &[u8]) -> FileKind {
-    if head.iter().take(SNIFF_LEN).any(|&b| b == 0) {
+    let window = &head[..head.len().min(SNIFF_LEN)];
+    let not_utf8 = std::str::from_utf8(window).is_err_and(|e| e.error_len().is_some());
+    if not_utf8 || window.contains(&0) {
         FileKind::External
     } else {
         FileKind::Text
@@ -131,6 +136,15 @@ mod tests {
         let mut late = vec![b'a'; SNIFF_LEN];
         late.push(0);
         assert_eq!(sniff(&late), FileKind::Text);
+        // NUL-free binary (a white-topped P5 PGM) is not UTF-8; a cut-off char at the window end is.
+        let mut pgm = b"P5\n1072 1448\n255\n".to_vec();
+        pgm.resize(SNIFF_LEN * 2, 0xFF);
+        assert_eq!(sniff(&pgm), FileKind::External);
+        let mut cut = vec![b'a'; SNIFF_LEN - 1];
+        cut.extend_from_slice("é".as_bytes());
+        assert_eq!(sniff(&cut), FileKind::Text);
+        assert_eq!(sniff("naïve ✓".as_bytes()), FileKind::Text);
+        assert_eq!(by_extension("shot.pgm"), Some(FileKind::External));
         assert_eq!(classify("a.png", || panic!("no read")), FileKind::Image);
     }
 }
