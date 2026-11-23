@@ -41,7 +41,13 @@ fn forward(
         let _ = events.send(n);
     }
     if ignore_changed && let Some(w) = weak.upgrade().and_then(|s| s.writer()) {
-        match w.call(|vw| vw.rebuild()) {
+        // Ownership and the watch set refresh through the watcher's one resync seam, the same
+        // as a folder-link change (plan folder-links-follow WP-2b, cycle-1 M2).
+        match w.call(|vw| {
+            let r = vw.rebuild();
+            vw.request_watch_resync(false);
+            r
+        }) {
             Ok(Ok(n)) => {
                 let _ = events.send(Notification::IndexGeneration { n });
             }

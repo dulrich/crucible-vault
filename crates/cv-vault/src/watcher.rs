@@ -16,12 +16,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
+use notify::{RecursiveMode, Watcher};
 
 use crate::fs::is_file_or_file_link;
 use crate::hash::ContentHash;
 use crate::path::is_ignored;
 use crate::writer::VaultWriter;
-use cv_index::{file_times, rel_path};
+use cv_index::{
+    DiscoveredFile, Discovery, Ownership, SkipReason, discover_listing, file_times, rel_path,
+};
 
 /// What happened to a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,11 +213,25 @@ struct Stat {
     size: u64,
     mtime: Option<SystemTime>,
     hash: Option<ContentHash>,
+    /// The file's canonical location when last seen (a folder-link retarget changes it).
+    canonical: Option<PathBuf>,
+    /// Re-read even if `(size, mtime)` and content match (an equal-stat retarget).
+    force: bool,
 }
 
 impl Stat {
+    fn of(md: &std::fs::Metadata, canonical: Option<PathBuf>) -> Self {
+        Self {
+            size: md.len(),
+            mtime: md.modified().ok(),
+            hash: None,
+            canonical,
+            force: false,
+        }
+    }
+
     fn same(&self, md: &std::fs::Metadata) -> bool {
-        self.size == md.len() && self.mtime == md.modified().ok()
+        !self.force && self.size == md.len() && self.mtime == md.modified().ok()
     }
 }
 
@@ -238,8 +255,24 @@ pub(crate) struct WatchState {
     links: HashMap<String, PathBuf>,
     /// Target file → the vault paths linking to it.
     by_target: HashMap<PathBuf, BTreeSet<String>>,
-    /// Set when `links` changed since the last [`Self::take_watch_dirs`].
+    /// Set when `links` changed since the last [`Self::apply_watches`].
     links_changed: bool,
+    /// Folder-link ownership of the last discovery (plan folder-links-follow WP-2b): translates
+    /// canonical event paths to their owning vault path and names the watch set.
+    own: Ownership,
+    /// Vault paths of folder-link entries (owned link roots and skipped links): an event at or
+    /// under one is a topology change.
+    link_paths: BTreeSet<String>,
+    /// The repo-owned `NonRecursive` registrations, keyed by canonical directory (all outside
+    /// the vault root; the root itself is the one `Recursive` watch).
+    registered: BTreeSet<PathBuf>,
+    /// Registrations whose directory went away (removed, moved out, `MOVE_SELF`): dropped at the
+    /// next resync so a directory reappearing at the same path is watched afresh.
+    dropped: BTreeSet<PathBuf>,
+    /// When the link topology last changed (ownership must be recomputed once it is quiet).
+    topology: Option<Instant>,
+    /// An overflow (`Flag::Rescan`) was seen: full reconcile and re-registration.
+    rescan: bool,
 }
 
 /// The file a symlink at `full` points to: canonical when it resolves, else (dangling) the
@@ -268,62 +301,111 @@ fn link_target(full: &Path) -> Option<PathBuf> {
     )
 }
 
+/// The nearest existing directory at or above `p`, canonical.
+fn nearest_existing(p: &Path) -> Option<PathBuf> {
+    let mut cur = Some(p);
+    while let Some(c) = cur {
+        if c.is_dir() {
+            return std::fs::canonicalize(c).ok();
+        }
+        cur = c.parent();
+    }
+    None
+}
+
+/// One discovery of `root` for the watcher: every file (excluded ones flagged, dot/temp
+/// directories pruned) and the ownership map — the same walk the index uses (WP-2a).
+fn discover_root(root: &Path) -> Option<Discovery> {
+    match discover_listing(root, &|rel| is_ignored(rel)) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!(error = %e, "watcher: vault discovery failed");
+            None
+        }
+    }
+}
+
 impl WatchState {
-    /// Seeds the `(size, mtime)` map from a walk of `root`; emits nothing (I4).
+    /// Seeds the `(size, mtime)` map and the ownership map from one discovery of `root`; emits
+    /// nothing (I4). Registers no watches: the caller's first [`Self::apply_watches`] does.
     pub(crate) fn seed(root: &Path, debounce: Duration) -> Self {
-        let mut seen = HashMap::new();
-        let mut links = HashMap::new();
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let ft = entry.file_type();
-            if !ft.is_file() && !ft.is_symlink() {
-                continue;
-            }
-            let Some(rel) = rel_path(root, entry.path()) else {
-                continue;
-            };
-            if is_ignored(&rel) {
-                continue;
-            }
-            if ft.is_symlink()
-                && let Some(t) = link_target(entry.path())
-            {
-                // Directory links stay unfollowed; dangling links are tracked for E2.
-                if t.is_dir() {
-                    continue;
-                }
-                links.insert(rel.clone(), t);
-            }
-            if let Ok(md) = std::fs::metadata(entry.path())
-                && md.is_file()
-            {
-                seen.insert(
-                    rel,
-                    Stat {
-                        size: md.len(),
-                        mtime: md.modified().ok(),
-                        hash: None,
-                    },
-                );
-            }
-        }
-        let mut by_target: HashMap<PathBuf, BTreeSet<String>> = HashMap::new();
-        for (rel, t) in &links {
-            by_target.entry(t.clone()).or_default().insert(rel.clone());
-        }
-        Self {
+        let mut st = Self {
             root: root.to_path_buf(),
-            seen,
+            seen: HashMap::new(),
             pending: HashMap::new(),
             renames: Vec::new(),
             moving_from: HashMap::new(),
             debounce,
-            links,
-            by_target,
+            links: HashMap::new(),
+            by_target: HashMap::new(),
             links_changed: true,
+            own: Ownership::default(),
+            link_paths: BTreeSet::new(),
+            registered: BTreeSet::new(),
+            dropped: BTreeSet::new(),
+            topology: None,
+            rescan: false,
+        };
+        let Some(mut disc) = discover_root(root) else {
+            return st;
+        };
+        let files = std::mem::take(&mut disc.files);
+        st.set_ownership(disc.ownership);
+        for f in &files {
+            if is_ignored(&f.path) {
+                continue;
+            }
+            st.seen
+                .insert(f.path.clone(), Stat::of(&f.meta, Some(f.canonical.clone())));
         }
+        st.refresh_links(&files);
+        st
+    }
+
+    fn set_ownership(&mut self, own: Ownership) {
+        let mut lp: BTreeSet<String> = own.skipped().map(|(p, _)| p.to_string()).collect();
+        for (dir, canon) in own.dirs() {
+            if dir.is_empty() {
+                continue;
+            }
+            let (parent, name) = dir.rsplit_once('/').unwrap_or(("", dir));
+            let physical = own
+                .canonical_of(parent)
+                .is_some_and(|pc| pc.join(name) == canon);
+            if !physical {
+                lp.insert(dir.to_string());
+            }
+        }
+        self.own = own;
+        self.link_paths = lp;
+    }
+
+    /// Records every file link and dangling link of a discovery.
+    fn refresh_links(&mut self, files: &[DiscoveredFile]) {
+        let dangling: Vec<String> = self
+            .own
+            .skipped()
+            .filter(|(_, r)| *r == SkipReason::Dangling)
+            .map(|(p, _)| p.to_string())
+            .collect();
+        for f in files.iter().filter(|f| f.file_link && !is_ignored(&f.path)) {
+            self.refresh_link(&f.path);
+        }
+        for p in dangling {
+            self.refresh_link(&p);
+        }
+    }
+
+    /// Whether `rel` is a folder-link entry or has one below it.
+    fn linked_under(&self, rel: &str) -> bool {
+        if self.link_paths.contains(rel) {
+            return true;
+        }
+        let prefix = format!("{rel}/");
+        self.link_paths
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|p| p.starts_with(&prefix))
     }
 
     /// Records (or clears) `rel`'s symlink target from the current filesystem state.
@@ -350,31 +432,270 @@ impl WatchState {
         self.links_changed = true;
     }
 
-    /// The directories outside the root holding link targets (one per directory; the root
-    /// itself is watched recursively), when the link set changed since the last call.
-    pub(crate) fn take_watch_dirs(&mut self) -> Option<BTreeSet<PathBuf>> {
-        if !self.links_changed {
-            return None;
+    /// The directories the owned set should watch: every folder-link subtree directory outside
+    /// the vault root (descendants included — one `NonRecursive` watch each), every file-link
+    /// target directory, and the nearest existing ancestor of each dangling link's target (so
+    /// its appearance is seen). Canonical and deduped, so no two registrations share an inode;
+    /// never inside the vault root (the root's own recursive watch covers it).
+    pub(crate) fn want_dirs(&self) -> BTreeSet<PathBuf> {
+        let croot = self.own.canonical_root().to_path_buf();
+        let mut want: BTreeSet<PathBuf> = self.own.external_dirs().map(Path::to_path_buf).collect();
+        for t in self.by_target.keys() {
+            if let Some(d) = t.parent().and_then(nearest_existing) {
+                want.insert(d);
+            }
         }
+        for (rel, r) in self.own.skipped() {
+            if r == SkipReason::Dangling
+                && let Some(t) = link_target(&self.root.join(rel))
+                && let Some(d) = nearest_existing(&t)
+            {
+                want.insert(d);
+            }
+        }
+        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        want.retain(|d| {
+            !d.starts_with(&croot) && !d.starts_with(&root) && !croot.as_os_str().is_empty()
+        });
+        want
+    }
+
+    /// Brings the owned registrations in line with [`Self::want_dirs`] (dropping the ones whose
+    /// directory went away first, so they are re-added fresh), then checks every newly
+    /// registered directory for files that appeared before its watch (audit E3). Returns the
+    /// number of new registrations.
+    pub(crate) fn apply_watches<W: Watcher>(&mut self, watcher: &mut W) -> usize {
         self.links_changed = false;
-        Some(
-            self.by_target
-                .keys()
-                .filter(|t| !t.starts_with(&self.root))
-                .filter_map(|t| t.parent().map(Path::to_path_buf))
-                .filter(|d| d.is_dir())
-                .collect(),
-        )
+        for d in std::mem::take(&mut self.dropped) {
+            if self.registered.remove(&d)
+                && let Err(e) = watcher.unwatch(&d)
+            {
+                tracing::debug!(error = %e, "unwatching a vanished directory");
+            }
+        }
+        let want = self.want_dirs();
+        for d in self.registered.difference(&want) {
+            if let Err(e) = watcher.unwatch(d) {
+                tracing::debug!(error = %e, "unwatching an owned directory");
+            }
+        }
+        self.registered.retain(|d| want.contains(d));
+        let mut fresh = Vec::new();
+        for d in want {
+            if self.registered.contains(&d) {
+                continue;
+            }
+            match watcher.watch(&d, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    self.registered.insert(d.clone());
+                    fresh.push(d);
+                }
+                Err(e) => tracing::warn!(error = %e, "watching an owned directory failed"),
+            }
+        }
+        // Queued already due: the resync itself is the settled state.
+        let now = Instant::now()
+            .checked_sub(self.debounce)
+            .unwrap_or_else(Instant::now);
+        for d in &fresh {
+            let Ok(rd) = std::fs::read_dir(d) else {
+                continue;
+            };
+            for e in rd.filter_map(|e| e.ok()) {
+                if !e.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()) {
+                    continue;
+                }
+                let p = e.path();
+                let Ok(md) = std::fs::metadata(&p) else {
+                    continue;
+                };
+                for r in self.vault_paths(&p) {
+                    if self.seen.get(&r).is_none_or(|s| !s.same(&md)) {
+                        self.pending.insert(r, now);
+                    }
+                }
+            }
+        }
+        fresh.len()
+    }
+
+    /// The file-link set changed since the last [`Self::apply_watches`].
+    pub(crate) fn links_changed(&self) -> bool {
+        self.links_changed
+    }
+
+    /// Whether a resync is due: `Some(true)` after an overflow, `Some(false)` once a topology
+    /// change has been quiet for the debounce window.
+    pub(crate) fn resync_due(&self, now: Instant) -> Option<bool> {
+        if self.rescan {
+            return Some(true);
+        }
+        self.topology
+            .filter(|at| now.duration_since(*at) >= self.debounce)
+            .map(|_| false)
+    }
+
+    /// The one refresh seam (plan folder-links-follow WP-2b) a link change, a `.gitignore`
+    /// rebuild and an overflow share: a fresh discovery replaces the ownership map (watcher and
+    /// index), the watch set is brought in line — `full` first drops and re-adds the root and
+    /// every owned registration, never keeping one because its path is unchanged (cycle-1 B2) —
+    /// and every path whose discovered state differs from what was seen (new, gone, changed
+    /// stat or canonical location, declined) is queued for examination.
+    pub(crate) fn resync<W: Watcher>(&mut self, w: &mut VaultWriter, watcher: &mut W, full: bool) {
+        self.topology = None;
+        self.rescan = false;
+        if full {
+            if let Err(e) = watcher.unwatch(&self.root) {
+                tracing::debug!(error = %e, "unwatching the vault root for a rescan");
+            }
+            if let Err(e) = watcher.watch(&self.root, RecursiveMode::Recursive) {
+                tracing::warn!(error = %e, "re-watching the vault root failed");
+            }
+            for d in std::mem::take(&mut self.registered) {
+                if let Err(e) = watcher.unwatch(&d) {
+                    tracing::debug!(error = %e, "unwatching an owned directory for a rescan");
+                }
+            }
+            self.dropped.clear();
+        }
+        let Some(mut disc) = discover_root(&self.root) else {
+            return;
+        };
+        let files = std::mem::take(&mut disc.files);
+        self.set_ownership(disc.ownership.clone());
+        w.index.refresh_discovery(&self.root, disc);
+        self.refresh_links(&files);
+        let now = Instant::now()
+            .checked_sub(self.debounce)
+            .unwrap_or_else(Instant::now);
+        let mut listed = std::collections::HashSet::new();
+        for f in &files {
+            if is_ignored(&f.path) {
+                continue;
+            }
+            listed.insert(f.path.as_str());
+            match self.seen.get_mut(&f.path) {
+                None => {
+                    self.pending.insert(f.path.clone(), now);
+                }
+                Some(s) if !s.same(&f.meta) => {
+                    self.pending.insert(f.path.clone(), now);
+                }
+                Some(s) if s.canonical.as_ref() != Some(&f.canonical) => {
+                    // A live equal-stat retarget: the content must be re-read and reindexed.
+                    s.force = true;
+                    self.pending.insert(f.path.clone(), now);
+                }
+                Some(_) => {}
+            }
+        }
+        let gone: Vec<String> = self
+            .seen
+            .keys()
+            .filter(|k| !listed.contains(k.as_str()))
+            .cloned()
+            .collect();
+        for k in gone {
+            self.pending.insert(k, now);
+        }
+        let n = self.apply_watches(watcher);
+        tracing::debug!(
+            full,
+            registered = self.registered.len(),
+            new = n,
+            "watch set resynced"
+        );
+    }
+
+    /// Every vault path an event at `p` concerns: `p` itself inside the root, else the owning
+    /// vault path of a canonical directory or entry (WP-2b translation); plus every file link
+    /// whose target is `p`.
+    fn vault_paths(&self, p: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(r) = rel_path(&self.root, p) {
+            if !is_ignored(&r) {
+                out.push(r);
+            }
+        } else if let Some(r) = self
+            .own
+            .owner_of(p)
+            .map(str::to_string)
+            .or_else(|| self.own.vault_path_of(p))
+            && !r.is_empty()
+            && !is_ignored(&r)
+        {
+            out.push(r);
+        }
+        if let Some(set) = self.by_target.get(p) {
+            out.extend(set.iter().cloned());
+        }
+        out
     }
 
     fn rel(&self, p: &Path) -> Option<String> {
-        rel_path(&self.root, p).filter(|r| !is_ignored(r))
+        self.vault_paths(p).into_iter().next()
+    }
+
+    /// Notes a topology change at raw event path `p`: a folder-link entry created, removed or
+    /// retargeted in the vault, a directory moved into or out of the vault, a `.gitignore`
+    /// change, or a directory created, moved or removed outside the root (an owned subtree
+    /// growing or shrinking, a dangling target appearing). A directory that went away loses its
+    /// registrations.
+    fn note_topology(&mut self, kind: &notify::EventKind, p: &Path, now: Instant) {
+        use notify::EventKind as K;
+        use notify::event::{CreateKind, RemoveKind};
+        let dir_kind = matches!(
+            kind,
+            K::Create(CreateKind::Folder)
+                | K::Remove(RemoveKind::Folder)
+                | K::Modify(ModifyKind::Name(_))
+        );
+        let mut dirty = p.file_name().is_some_and(|n| n == cv_index::GITIGNORE);
+        let lmd = p.symlink_metadata().ok();
+        let is_dir = lmd.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        if let Some(rel) = rel_path(&self.root, p) {
+            let is_link = lmd.as_ref().is_some_and(|m| m.file_type().is_symlink());
+            if is_link && (p.is_dir() || std::fs::metadata(p).is_err()) {
+                dirty = true;
+            }
+            if (is_link || dir_kind || lmd.is_none()) && self.linked_under(&rel) {
+                dirty = true;
+            }
+            if is_dir && matches!(kind, K::Modify(ModifyKind::Name(_))) {
+                dirty = true; // a directory moved in may hold folder links
+            }
+        } else if dir_kind {
+            if is_dir || self.own.owner_of(p).is_some() || self.registered.contains(p) {
+                dirty = true;
+            }
+            if !is_dir {
+                let gone: Vec<PathBuf> = self
+                    .registered
+                    .iter()
+                    .filter(|d| d.starts_with(p))
+                    .cloned()
+                    .collect();
+                self.dropped.extend(gone);
+            }
+        }
+        if dirty {
+            self.topology = Some(now);
+        }
     }
 
     /// Records a raw notify event as hints.
     pub(crate) fn on_notify(&mut self, ev: &notify::Event) {
         use notify::EventKind as K;
+        if ev.need_rescan() {
+            self.rescan = true;
+            return;
+        }
         let now = Instant::now();
+        if !matches!(ev.kind, K::Access(_)) {
+            for p in &ev.paths {
+                self.note_topology(&ev.kind, p, now);
+            }
+        }
         match ev.kind {
             K::Access(AccessKind::Close(AccessMode::Write)) => {}
             K::Access(_) => return,
@@ -386,7 +707,8 @@ impl WatchState {
                 }
             }
             K::Modify(ModifyKind::Name(RenameMode::Both)) if ev.paths.len() == 2 => {
-                if let Some(f) = rel_path(&self.root, &ev.paths[0]) {
+                let f = rel_path(&self.root, &ev.paths[0]).or_else(|| self.rel(&ev.paths[0]));
+                if let Some(f) = f {
                     self.moving_from.remove(&f);
                 }
                 if let (Some(f), Some(t)) = (self.rel(&ev.paths[0]), self.rel(&ev.paths[1])) {
@@ -397,14 +719,8 @@ impl WatchState {
             _ => {}
         }
         for p in &ev.paths {
-            if let Some(r) = self.rel(p) {
+            for r in self.vault_paths(p) {
                 self.pending.insert(r, now);
-            }
-            // A change to a link target maps back to every vault path linking to it.
-            if let Some(set) = self.by_target.get(p) {
-                for r in set {
-                    self.pending.insert(r.clone(), now);
-                }
             }
         }
     }
@@ -415,6 +731,7 @@ impl WatchState {
             .iter()
             .map(|(p, at)| self.hold_until(p, *at))
             .chain(self.renames.iter().map(|r| r.2))
+            .chain(self.topology)
             .map(|at| (at + self.debounce).saturating_duration_since(now))
             .min()
     }
@@ -432,6 +749,11 @@ impl WatchState {
     /// Examines every path quiet for the debounce window; applies external changes to the index
     /// on `w` and returns the events.
     pub(crate) fn flush(&mut self, w: &mut VaultWriter) -> Vec<VaultEvent> {
+        // A pending topology change is applied first (the resync seam), so no path is examined
+        // against a stale ownership map.
+        if self.topology.is_some() || self.rescan {
+            return Vec::new();
+        }
         let now = Instant::now();
         let deb = self.debounce;
         let due = |at: Instant| now.duration_since(at) >= deb;
@@ -454,13 +776,21 @@ impl WatchState {
                 self.examine(w, &to, &mut out);
             }
         }
+        // A half of a rename still waiting to pair waits with it (its hint and the pairing land
+        // microseconds apart, so the hint alone can fall due first).
+        let pairing: std::collections::HashSet<&str> = self
+            .renames
+            .iter()
+            .flat_map(|(f, t, _)| [f.as_str(), t.as_str()])
+            .collect();
         let mut paths: Vec<String> = self
             .pending
             .iter()
-            .filter(|(p, at)| due(self.hold_until(p, **at)))
+            .filter(|(p, at)| due(self.hold_until(p, **at)) && !pairing.contains(p.as_str()))
             .map(|(p, _)| p.clone())
             .collect();
-        paths.sort();
+        // Declined paths first, so an alias id moves to its winner before the winner is bound.
+        paths.sort_by_key(|p| (w.index.admit(p).is_ok(), p.clone()));
         for p in paths {
             self.pending.remove(&p);
             self.moving_from.remove(&p);
@@ -499,14 +829,9 @@ impl WatchState {
             return false;
         }
         self.seen.remove(from);
-        self.seen.insert(
-            to.to_string(),
-            Stat {
-                size: md.len(),
-                mtime: md.modified().ok(),
-                hash: Some(h.clone()),
-            },
-        );
+        let mut st = Stat::of(&md, std::fs::canonicalize(&to_full).ok());
+        st.hash = Some(h.clone());
+        self.seen.insert(to.to_string(), st);
         let echo = w.echoes.take_match(to, Some(&h));
         w.echoes.take_match(from, None);
         if !seen_same {
@@ -528,7 +853,7 @@ impl WatchState {
         if echo.is_some() {
             return true;
         }
-        let id = external_id(w.note_ids_mut().moved(from, to));
+        let id = external_id(w.moved_external(from, to));
         out.push(VaultEvent {
             path: to.to_string(),
             kind: EventKind::Renamed {
@@ -579,6 +904,10 @@ impl WatchState {
 
     fn examine_file(&mut self, w: &mut VaultWriter, path: &str, out: &mut Vec<VaultEvent>) {
         self.refresh_link(path);
+        if w.index.admit(path).is_err() {
+            self.retire_declined(w, path, out);
+            return;
+        }
         let full = self.root.join(path);
         let md = match std::fs::metadata(&full) {
             Ok(md) if md.is_file() => md,
@@ -612,6 +941,7 @@ impl WatchState {
         if prev.as_ref().is_some_and(|p| p.same(&md)) {
             return;
         }
+        let forced = prev.as_ref().is_some_and(|p| p.force);
         let bytes = match std::fs::read(&full) {
             Ok(b) => b,
             Err(e) => {
@@ -620,13 +950,10 @@ impl WatchState {
             }
         };
         let h = ContentHash::of(&bytes);
-        let stat = Stat {
-            size: md.len(),
-            mtime: md.modified().ok(),
-            hash: Some(h.clone()),
-        };
+        let mut stat = Stat::of(&md, std::fs::canonicalize(&full).ok());
+        stat.hash = Some(h.clone());
         self.seen.insert(path.to_string(), stat);
-        if prev.as_ref().and_then(|p| p.hash.as_ref()) == Some(&h) {
+        if !forced && prev.as_ref().and_then(|p| p.hash.as_ref()) == Some(&h) {
             return;
         }
         let echo = w.echoes.take_match(path, Some(&h));
@@ -639,7 +966,7 @@ impl WatchState {
         if echo.is_some() {
             return; // the writer's own mutation: already reported by the writer
         }
-        let id = external_id(w.note_ids_mut().bind(path));
+        let id = external_id(w.bind_external(path));
         out.push(VaultEvent {
             path: path.to_string(),
             kind: if prev.is_none() {
@@ -650,6 +977,43 @@ impl WatchState {
             origin: Origin::External,
             id,
             hash: Some(h),
+        });
+    }
+}
+
+impl WatchState {
+    /// A seen path the ownership map now declines (its link lost to another alias, looped or
+    /// went dangling — Decision 5): its row is dropped, and its id follows the WP-2a rule — it
+    /// moves to the winning path when that has none (reported as a rename), else it retires.
+    fn retire_declined(&mut self, w: &mut VaultWriter, path: &str, out: &mut Vec<VaultEvent>) {
+        if self.seen.remove(path).is_none() {
+            return;
+        }
+        if let Err(e) = w.index.remove_file(path) {
+            tracing::warn!(path, error = %e, "index update for a declined path failed");
+        }
+        let winner = w.index.ownership().winner_of(path);
+        let id = external_id(w.note_ids_mut().retired(path, None));
+        if let (Some(win), Some(id)) = (&winner, id)
+            && w.note_ids_mut().revive(id, win).unwrap_or(false)
+        {
+            out.push(VaultEvent {
+                path: win.clone(),
+                kind: EventKind::Renamed {
+                    from: path.to_string(),
+                },
+                origin: Origin::External,
+                id: Some(id),
+                hash: None,
+            });
+            return;
+        }
+        out.push(VaultEvent {
+            path: path.to_string(),
+            kind: EventKind::Deleted { replaced_by: None },
+            origin: Origin::External,
+            id,
+            hash: None,
         });
     }
 }

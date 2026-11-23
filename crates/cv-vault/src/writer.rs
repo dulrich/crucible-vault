@@ -62,6 +62,9 @@ pub struct VaultWriter {
     /// Decision 3: `Some` inside an automation scope ([`Self::automation`]), holding the vault
     /// paths whose removal or move the guard skipped.
     automation: Option<Vec<String>>,
+    /// A requested watch-set refresh (plan folder-links-follow WP-2b): `Some(full)` until the
+    /// watcher thread takes it; `full` rebuilds every registration (the `Rescan` resync).
+    watch_resync: Option<bool>,
 }
 
 /// Receives each [`TrashRecord`] right after its move (the daemon persists it to `trash_entries`).
@@ -92,6 +95,7 @@ impl VaultWriter {
             events: None,
             ids,
             automation: None,
+            watch_resync: None,
         }
     }
 
@@ -206,9 +210,41 @@ impl VaultWriter {
         self.events = Some(tx);
     }
 
-    /// The note-id sink (the watcher binds External transitions through it).
+    /// The note-id sink (the watcher retires External transitions through it; binds and moves
+    /// go through the admission-gated [`Self::bind_external`] / [`Self::moved_external`]).
     pub(crate) fn note_ids_mut(&mut self) -> &mut dyn NoteIdSink {
         self.ids.as_mut()
+    }
+
+    /// The watcher's bind of an External transition, gated by Decision 5's admission rule (plan
+    /// folder-links-follow WP-2b): a declined path never gets an id.
+    pub(crate) fn bind_external(&mut self, path: &str) -> IdResult<NoteId> {
+        self.index
+            .admit(path)
+            .map_err(|d| crate::note_id::NoteIdError(d.to_string()))?;
+        self.ids.bind(path)
+    }
+
+    /// The watcher's External move, gated like [`Self::bind_external`] on the destination.
+    pub(crate) fn moved_external(&mut self, from: &str, to: &str) -> IdResult<NoteId> {
+        self.index
+            .admit(to)
+            .map_err(|d| crate::note_id::NoteIdError(d.to_string()))?;
+        self.ids.moved(from, to)
+    }
+
+    /// Asks the watcher (if any) to recompute folder-link ownership and refresh its watch set
+    /// after the current job — the one seam a link change, a `.gitignore` rebuild and an
+    /// overflow share (plan folder-links-follow WP-2b). `full` drops and re-adds every
+    /// registration and reconciles the whole vault (the `Rescan` resync). Without a watcher
+    /// it is a no-op.
+    pub fn request_watch_resync(&mut self, full: bool) {
+        self.watch_resync = Some(self.watch_resync.unwrap_or(false) || full);
+    }
+
+    /// Takes a pending [`Self::request_watch_resync`].
+    pub(crate) fn take_watch_resync(&mut self) -> Option<bool> {
+        self.watch_resync.take()
     }
 
     /// The id of the file at `path`, minted if it has none. Runs on the writer thread, so it

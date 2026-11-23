@@ -5,10 +5,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-
-use notify::{RecursiveMode, Watcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::error::{Result, VaultError};
 use crate::hash::ContentHash;
@@ -93,6 +90,12 @@ impl WriterHandle {
         self.call(VaultWriter::rebuild)?
     }
 
+    /// [`VaultWriter::request_watch_resync`] with `full`: the overflow resync entry point (a
+    /// full reconcile and fresh registrations), also driven directly by tests.
+    pub fn resync_watches(&self, full: bool) -> Result<()> {
+        self.call(move |w| w.request_watch_resync(full))
+    }
+
     /// [`VaultWriter::bind_note`]: the id of the file at `path`, minted if needed, on the writer
     /// thread (plan note-identity WP-2 answers `bind_note` through this).
     pub fn bind_note(&self, path: &str) -> Result<NoteId> {
@@ -126,6 +129,12 @@ pub fn spawn_writer(writer: VaultWriter) -> Result<(WriterHandle, JoinHandle<()>
 /// (I4). External changes are applied to the index on the writer thread, then sent on the
 /// returned receiver; the daemon's own mutations are sent by the writer itself (exactly once,
 /// `Origin::Daemon`, before the mutating call returns — plan note-path-continuity D1).
+///
+/// Folder links (plan folder-links-follow WP-2b, posture (a)): the root watch never follows
+/// links; every directory outside the root that the vault reaches (folder-link subtrees, file-link
+/// target directories, dangling targets' nearest ancestors) is one repo-owned `NonRecursive`
+/// watch keyed by canonical directory, refreshed through [`WatchState::resync`] on a link
+/// change, a `.gitignore` change, [`VaultWriter::request_watch_resync`] or an overflow.
 pub fn spawn_writer_with_watcher(
     writer: VaultWriter,
     cfg: WatchConfig,
@@ -133,16 +142,20 @@ pub fn spawn_writer_with_watcher(
     let mut writer = writer.with_echo_ttl(cfg.echo_ttl);
     let root = writer.fs().root().to_path_buf();
     let (fs_tx, fs_rx) = mpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher = notify::recommended_watcher(move |ev| {
-        // The receiver only goes away when the writer thread exits.
-        if fs_tx.send(ev).is_err() {
-            tracing::debug!("watcher event after writer exit");
-        }
-    })?;
+    let mut watcher = RecommendedWatcher::new(
+        move |ev| {
+            // The receiver only goes away when the writer thread exits.
+            if fs_tx.send(ev).is_err() {
+                tracing::debug!("watcher event after writer exit");
+            }
+        },
+        Config::default().with_follow_symlinks(false),
+    )?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
     let mut state = WatchState::seed(&root, cfg.debounce);
-    let mut link_dirs = BTreeSet::new();
-    sync_link_dirs(&mut watcher, &mut state, &mut link_dirs);
+    // Registers the owned set and checks each new directory for files written before its watch
+    // (audit E3).
+    state.apply_watches(&mut watcher);
     let (tx, rx) = mpsc::channel::<Job>();
     let (ev_tx, ev_rx) = mpsc::channel::<VaultEvent>();
     writer.set_event_sender(ev_tx.clone());
@@ -164,46 +177,24 @@ pub fn spawn_writer_with_watcher(
                         Err(e) => tracing::warn!(error = %e, "watcher error"),
                     }
                 }
+                let asked = writer.take_watch_resync();
+                let due = state.resync_due(Instant::now());
+                if asked.is_some() || due.is_some() {
+                    let full = asked.unwrap_or(false) || due.unwrap_or(false);
+                    if full {
+                        tracing::info!("watcher resync: re-registering every watch");
+                    }
+                    state.resync(&mut writer, &mut watcher, full);
+                } else if state.links_changed() {
+                    state.apply_watches(&mut watcher);
+                }
                 for ev in state.flush(&mut writer) {
                     if ev_tx.send(ev).is_err() {
                         tracing::debug!("vault event dropped: no subscriber");
                     }
                 }
-                sync_link_dirs(&mut watcher, &mut state, &mut link_dirs);
             }
         })
         .map_err(|e| crate::error::io(std::path::Path::new("cv-writer thread"), e))?;
     Ok((WriterHandle { tx }, ev_rx, join))
-}
-
-/// Brings the non-recursive watches on symlink-target directories in line with the link set
-/// (plan editor-cutover-blockers WP-1): one watch per directory, added and dropped as links are
-/// added, removed or retargeted inside the vault.
-fn sync_link_dirs(
-    watcher: &mut impl Watcher,
-    state: &mut WatchState,
-    watched: &mut BTreeSet<PathBuf>,
-) {
-    let Some(want) = state.take_watch_dirs() else {
-        return;
-    };
-    for d in watched.difference(&want) {
-        if let Err(e) = watcher.unwatch(d) {
-            tracing::debug!(error = %e, "unwatching a link-target directory");
-        }
-    }
-    let mut now = BTreeSet::new();
-    for d in want {
-        if watched.contains(&d) {
-            now.insert(d);
-            continue;
-        }
-        match watcher.watch(&d, RecursiveMode::NonRecursive) {
-            Ok(()) => {
-                now.insert(d);
-            }
-            Err(e) => tracing::warn!(error = %e, "watching a link-target directory failed"),
-        }
-    }
-    *watched = now;
 }
