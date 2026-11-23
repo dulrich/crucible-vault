@@ -2,10 +2,22 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.5.0 — 2026-11-23
+
+### Added
+
+- Folder symlinks in the vault are followed: notes and files under a folder link are indexed, listed, watched and openable under their vault path, and stay indexed after a daemon restart. Edits under a link, new subdirectories, directories moved in or out, a dangling link whose target appears, and a link retargeted to another directory are picked up without a restart (D38).
+- Startup logs aggregate counts of skipped folder links (loops, duplicate aliases of one directory, dangling links).
+
+### Changed
+
+- One vault path per directory: when two folder links (or a link and a real folder) reach the same directory, the real folder wins, else the first link in sorted path order; the others are skipped. A write or `bind_note` through a skipped path is refused (`REFUSED` 1005) instead of creating a second copy in the index.
+- Automation never removes or moves files outside the vault root, whatever `CV_LINK_WRITE_ROOTS` allows. Steps count the skip in new outcome vars: tidy `orphans_outside`, file `move_skipped_outside`, reconcile_repair `dup_outside`, fanfic_title `fanfic_skipped_outside` (backfill: `outside`), localize `retire_skipped_outside`, dupes_resolve `trash_skipped_outside`, auto_file action `skipped_outside`.
+- `index.db` moves to schema v3 (each row records its file's canonical location, so a link retargeted while the daemon was stopped is reindexed). The first start rebuilds the index; no migration.
 
 ### Fixed
 
+- Security: a write, move or delete addressed through a folder link anywhere in the path is confined to the vault and `CV_LINK_WRITE_ROOTS`; before, only the final path component was checked, so a path through a folder link could act on files outside every write root. Attachment reuse goes through the same check, and trash storage reached through a link is refused.
 - Editor: in a note that embeds the same image more than once, scrolling one copy out of view no longer turns a copy still on screen into a placeholder. Each copy now keeps the image loaded on its own.
 
 ## 1.4.0 — 2026-11-22
