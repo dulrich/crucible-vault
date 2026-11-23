@@ -510,7 +510,25 @@ pub fn decode_width(display: f32) -> u32 {
 
 /// Decodes `bytes`, downscaled to at most `max_width` (aspect kept), into an RGBA handle.
 pub fn decode(bytes: &[u8], max_width: u32) -> Result<Decoded, DecodeError> {
-    let img = image::load_from_memory(bytes)?;
+    decode_image(image::load_from_memory(bytes)?, max_width)
+}
+
+/// [`decode`] with the vault path's extension as a format hint (TGA has no magic bytes, so a
+/// content guess cannot find it). A hinted format is tried first; if it fails, the content guess
+/// is tried; if that fails too, the hinted error is returned. No or unknown extension: content
+/// guess only.
+pub fn decode_path(bytes: &[u8], path: &str, max_width: u32) -> Result<Decoded, DecodeError> {
+    let img = match image::ImageFormat::from_path(path) {
+        Ok(fmt) => match image::load_from_memory_with_format(bytes, fmt) {
+            Ok(i) => i,
+            Err(hinted) => image::load_from_memory(bytes).map_err(|_| hinted)?,
+        },
+        Err(_) => image::load_from_memory(bytes)?,
+    };
+    decode_image(img, max_width)
+}
+
+fn decode_image(img: image::DynamicImage, max_width: u32) -> Result<Decoded, DecodeError> {
     let img = if img.width() > max_width {
         let h =
             (u64::from(img.height()) * u64::from(max_width) / u64::from(img.width().max(1))).max(1);
@@ -561,7 +579,7 @@ pub fn load_task<M: Send + 'static>(
                 let (bytes, _) = daemon
                     .read_file(&k)
                     .map_err(|e| DecodeError::Read(e.to_string()))?;
-                decode(&bytes, width)
+                decode_path(&bytes, &k, width)
             })
             .await
             {
@@ -610,5 +628,108 @@ mod gate_tests {
         assert_eq!(done, 8);
         assert!(PEAK.load(Ordering::SeqCst) <= DECODE_CONCURRENCY);
         assert_eq!(TEST_GATE.available_permits(), DECODE_CONCURRENCY);
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use image::ImageFormat;
+
+    fn encode(fmt: ImageFormat) -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([10, 200, 30, 255]),
+        ));
+        let img = match fmt {
+            ImageFormat::Hdr => image::DynamicImage::ImageRgb32F(img.to_rgb32f()),
+            ImageFormat::Farbfeld => image::DynamicImage::ImageRgba16(img.to_rgba16()),
+            _ => img,
+        };
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, fmt).expect("encode");
+        out.into_inner()
+    }
+
+    fn check(name: &str, bytes: &[u8]) {
+        let d = decode_path(bytes, name, 64).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((d.width, d.height), (4, 4), "{name}");
+    }
+
+    #[test]
+    fn hinted_decode_per_encodable_format() {
+        for (name, fmt) in [
+            ("x.pnm", ImageFormat::Pnm),
+            ("x.ppm", ImageFormat::Pnm),
+            ("x.hdr", ImageFormat::Hdr),
+            ("x.ff", ImageFormat::Farbfeld),
+            ("x.ico", ImageFormat::Ico),
+            ("x.qoi", ImageFormat::Qoi),
+            ("x.tif", ImageFormat::Tiff),
+            ("x.TIFF", ImageFormat::Tiff),
+        ] {
+            check(name, &encode(fmt));
+        }
+    }
+
+    #[test]
+    fn tga_needs_the_extension_hint() {
+        let tga = encode(ImageFormat::Tga);
+        check("x.tga", &tga);
+        assert!(
+            decode(&tga, 64).is_err(),
+            "content guessing cannot find TGA"
+        );
+        assert!(decode_path(&tga, "x", 64).is_err());
+    }
+
+    /// A complete 4x4 DXT1 DDS: 128-byte header (magic + 124) and one 8-byte block.
+    fn dds() -> Vec<u8> {
+        let mut b = b"DDS ".to_vec();
+        let mut put = |v: u32| b.extend_from_slice(&v.to_le_bytes());
+        put(124); // dwSize
+        put(0x1 | 0x2 | 0x4 | 0x1000 | 0x8); // caps|height|width|pixelformat|pitch
+        put(4); // height
+        put(4); // width
+        put(8); // linear size
+        put(0); // depth
+        put(0); // mipmaps
+        for _ in 0..11 {
+            put(0);
+        }
+        put(32); // pixelformat size
+        put(0x4); // FOURCC
+        put(u32::from_le_bytes(*b"DXT1"));
+        put(0); // bit count
+        put(0);
+        put(0);
+        put(0);
+        put(0);
+        put(0x1000); // caps: texture
+        put(0);
+        put(0);
+        put(0);
+        put(0); // reserved2
+        assert_eq!(b.len(), 128);
+        // One 4x4 DXT1 block: both endpoint colours 0x07E0 (green), all indices 0.
+        b.extend_from_slice(&[0xE0, 0x07, 0xE0, 0x07, 0, 0, 0, 0]);
+        b
+    }
+
+    #[test]
+    fn hinted_decode_dds() {
+        check("x.dds", &dds());
+    }
+
+    #[test]
+    fn hint_failure_falls_back_to_content_then_hinted_error() {
+        // A PNG named .tga: the hinted TGA decode fails, the content guess succeeds.
+        let png = encode(ImageFormat::Png);
+        check("x.tga", &png);
+        // Garbage fails both; the error is the hinted one.
+        let err = decode_path(b"not an image", "x.tga", 64).expect_err("garbage");
+        assert!(matches!(err, DecodeError::Image(_)));
+        assert!(decode_path(b"not an image", "x.zzz", 64).is_err());
     }
 }

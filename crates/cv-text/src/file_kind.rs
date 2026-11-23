@@ -4,7 +4,7 @@
 //! By extension first: markdown and known text extensions are [`FileKind::Text`]; the image
 //! formats the editor decodes are [`FileKind::Image`]; `pdf` is [`FileKind::Pdf`] (plan round-15
 //! WP-3); the image formats it cannot decode
-//! (`svg`, `avif`) and known binary/media/archive/office formats are [`FileKind::External`]. An
+//! (`svg`, `avif`, `exr`, …) and known binary/media/archive/office formats are [`FileKind::External`]. An
 //! extensionless path is `Text` (a note link target); an unknown extension is `Text` unless
 //! [`sniff`] finds a NUL byte or invalid UTF-8 in its first [`SNIFF_LEN`] bytes.
 
@@ -29,15 +29,17 @@ pub const TEXT_EXTS: &[&str] = &[
 ];
 
 /// Extensions the editor decodes into an image tab (the `image` codecs it links).
-pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+pub const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "pgm", "ppm", "pbm", "pnm", "pam", "tga", "hdr",
+    "dds", "ico", "qoi", "tif", "tiff", "ff",
+];
 
 /// Extensions always handed to the system opener.
 pub const EXTERNAL_EXTS: &[&str] = &[
     // Documents the editor cannot render.
     "epub", "djvu", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
     // Images it does not decode.
-    "svg", "avif", "heic", "heif", "tif", "tiff", "ico", "psd", "xcf", "raw", "cr2", "nef", "pgm",
-    "ppm", "pbm", "pnm", "pam", "tga", "qoi", "exr", "hdr", "dds", "jxl",
+    "svg", "avif", "heic", "heif", "psd", "xcf", "raw", "cr2", "nef", "exr", "jxl",
     // Audio / video.
     "mp3", "m4a", "wav", "flac", "ogg", "oga", "opus", "aac", "webm", "mp4", "m4v", "mkv", "mov",
     "avi", "3gp", // Archives / binaries / fonts / databases.
@@ -108,6 +110,20 @@ mod tests {
             ("att/p.PNG", Some(FileKind::Image)),
             ("att/p.jpeg", Some(FileKind::Image)),
             ("att/p.webp", Some(FileKind::Image)),
+            ("att/s.pgm", Some(FileKind::Image)),
+            ("att/s.PPM", Some(FileKind::Image)),
+            ("att/s.pbm", Some(FileKind::Image)),
+            ("att/s.pnm", Some(FileKind::Image)),
+            ("att/s.pam", Some(FileKind::Image)),
+            ("att/s.tga", Some(FileKind::Image)),
+            ("att/s.hdr", Some(FileKind::Image)),
+            ("att/s.dds", Some(FileKind::Image)),
+            ("att/s.ico", Some(FileKind::Image)),
+            ("att/s.qoi", Some(FileKind::Image)),
+            ("att/s.tif", Some(FileKind::Image)),
+            ("att/s.TIFF", Some(FileKind::Image)),
+            ("att/s.ff", Some(FileKind::Image)),
+            ("att/s.exr", Some(FileKind::External)),
             ("doc.pdf", Some(FileKind::Pdf)),
             ("x/Doc.PDF", Some(FileKind::Pdf)),
             ("doc.docx", Some(FileKind::External)),
@@ -144,7 +160,7 @@ mod tests {
         cut.extend_from_slice("é".as_bytes());
         assert_eq!(sniff(&cut), FileKind::Text);
         assert_eq!(sniff("naïve ✓".as_bytes()), FileKind::Text);
-        assert_eq!(by_extension("shot.pgm"), Some(FileKind::External));
+        assert_eq!(by_extension("shot.pgm"), Some(FileKind::Image));
         assert_eq!(classify("a.png", || panic!("no read")), FileKind::Image);
     }
 }

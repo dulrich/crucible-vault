@@ -796,3 +796,24 @@ fn percent_comments_are_hidden() {
         Block::Paragraph(vec![t("a "), Inline::Code("%%x%%".into())])
     );
 }
+
+/// Round-25 WP-1: the extra image formats embed as images; external formats keep their file card.
+#[test]
+fn extra_image_formats_embed_as_images() {
+    for f in ["shot.pgm", "a.tif", "x.TGA"] {
+        let m = lower(&format!("![[{f}]]\n"));
+        assert!(
+            matches!(m.blocks[0], Block::Image { .. }),
+            "{f}: {:?}",
+            m.blocks
+        );
+    }
+    for f in ["x.svg", "x.avif"] {
+        assert_eq!(
+            lower(&format!("![[{f}]]\n")).blocks,
+            vec![Block::FileEmbed { target: f.into() }]
+        );
+    }
+    assert!(is_image_target("a/b.qoi"));
+    assert!(!is_image_target("x.svg"));
+}

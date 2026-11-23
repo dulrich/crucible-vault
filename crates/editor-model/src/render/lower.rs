@@ -7,14 +7,12 @@ use super::model::{
     Align, Block, Cell, Fold, FootnoteDef, Inline, ListItem, LowerOptions, RenderModel, Style,
 };
 
-/// Extensions treated as images when embedded.
-const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
-
-/// Whether a link target names an image file.
+/// Whether a link target names an image file the editor decodes (the shared classifier;
+/// `svg`/`avif` are External and never reach the image branch of the embed lowering).
 pub fn is_image_target(target: &str) -> bool {
-    target
-        .rsplit_once('.')
-        .is_some_and(|(_, ext)| IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+    target.rsplit_once('.').is_some_and(|_| {
+        cv_text::file_kind::by_extension(target) == Some(cv_text::file_kind::FileKind::Image)
+    })
 }
 
 /// Whether a URL has a URI scheme (`https:`, `data:`, …) — never resolved to a vault file.

@@ -20,7 +20,7 @@ path = "src/main.rs"
 # iced's `default-features` are off; the other iced defaults are kept explicitly: `crisp`,
 # `web-colors`, `thread-pool`, `linux-theme-detection`, `x11`, `wayland`.
 iced = { version = "=0.14.0", default-features = false, features = ["image-without-codecs", "tokio", "advanced", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland"] }
-image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "pnm", "tga", "hdr", "dds", "ff", "ico", "qoi", "tiff"] }
 anyhow = "=1.0.104"
 thiserror = "=2.0.21"
 serde = { version = "=1.0.229", features = ["derive"] }
