@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## Unreleased
 
+### Security
+
+- Bump `url` 2.5.8 → 2.5.9 (and `form_urlencoded` 1.2.2 → 1.2.3) for RUSTSEC-2026-0592.
+
 ### Fixed
 
 - Editor: a text selection in Reading is no longer cleared when another file in the vault is created, deleted or renamed (for example when intake files a new note or saves an attachment). The selection is kept whenever the note's displayed text is unchanged by the refresh.
