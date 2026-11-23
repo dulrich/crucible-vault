@@ -2,7 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.4.0 — 2026-11-22
+
+### Added
+
+- Editor: PNM (`pgm`, `ppm`, `pbm`, `pnm`, `pam`), TGA, HDR, DDS, QOI, TIFF (`tif`, `tiff`), ICO and farbfeld (`ff`) files open in an image tab and render as image embeds in Reading (for example `![[shot.pgm]]`). The decoder takes the format from the file extension and falls back to sniffing the content, so TGA files, which carry no signature, decode too.
+- Editor: Reading draws images inside table cells. An image scales to the cell width and honours a `|N` width, including Obsidian's escaped form `![[img.png\|200]]` inside a table; text and images in the same cell stack vertically, and the alt text is the copy text.
 
 ### Security
 
@@ -11,7 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Editor: a text selection in Reading is no longer cleared when another file in the vault is created, deleted or renamed (for example when intake files a new note or saves an attachment). The selection is kept whenever the note's displayed text is unchanged by the refresh.
-- Editor: opening a binary file with an unrecognised extension (for example a `.pgm` screenshot) no longer hangs the editor by loading it into a text tab. A file whose first 8 KiB is not valid UTF-8 now goes to the system opener, as one containing a NUL byte already did, and the PNM family (`pgm`, `ppm`, `pbm`, `pnm`, `pam`) plus `tga`, `qoi`, `exr`, `hdr`, `dds` and `jxl` are known external formats.
+- Editor: opening a binary file with an unrecognised extension (for example a `.pgm` screenshot) no longer hangs the editor by loading it into a text tab. A file whose first 8 KiB is not valid UTF-8 now goes to the system opener, as one containing a NUL byte already did. `exr`, `jxl`, `svg` and `avif` files still go to the system opener; the PNM, TGA, HDR, DDS, QOI, TIFF, ICO and farbfeld formats now open as images (see Added).
 
 ## 1.3.0 — 2026-11-21
 
