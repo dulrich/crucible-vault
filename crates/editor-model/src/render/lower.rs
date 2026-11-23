@@ -4,7 +4,8 @@ use comrak::nodes::{AstNode, ListType, NodeValue, TableAlignment};
 use comrak::{Arena, parse_document};
 
 use super::model::{
-    Align, Block, Cell, Fold, FootnoteDef, Inline, ListItem, LowerOptions, RenderModel, Style,
+    Align, Block, Cell, CellPart, Fold, FootnoteDef, Inline, ListItem, LowerOptions, RenderModel,
+    Style,
 };
 
 /// Whether a link target names an image file the editor decodes (the shared classifier;
@@ -201,7 +202,7 @@ impl Lower {
                     let is_header = matches!(row.data().value, NodeValue::TableRow(true));
                     let cells: Vec<Cell> = row
                         .children()
-                        .map(|cell| spans_only(self.inlines(cell.children())))
+                        .map(|cell| cell_parts(self.inlines(cell.children())))
                         .collect();
                     if is_header {
                         header = cells;
@@ -576,6 +577,41 @@ fn merge_text(pieces: Vec<Piece>) -> Vec<Piece> {
             continue;
         }
         out.push(p);
+    }
+    out
+}
+
+/// Plan round-25 WP-2: a table cell keeps its images (source order); transclusions become a
+/// wiki link as in [`spans_only`], other blocks are dropped.
+fn cell_parts(pieces: Vec<Piece>) -> Vec<CellPart> {
+    let mut out: Vec<CellPart> = Vec::new();
+    for p in pieces {
+        let span = match p {
+            Piece::Block(Block::Image {
+                src,
+                alt,
+                width,
+                remote,
+                link,
+            }) => {
+                out.push(CellPart::Image {
+                    src,
+                    alt,
+                    width,
+                    remote,
+                    link,
+                });
+                continue;
+            }
+            p => match spans_only(vec![p]).pop() {
+                Some(s) => s,
+                None => continue,
+            },
+        };
+        match out.last_mut() {
+            Some(CellPart::Inlines(v)) => v.push(span),
+            _ => out.push(CellPart::Inlines(vec![span])),
+        }
     }
     out
 }

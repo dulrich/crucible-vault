@@ -119,9 +119,10 @@ fn table_with_alignments() {
         panic!("table")
     };
     assert_eq!(alignments, vec![Align::Left, Align::Right]);
-    assert_eq!(header, vec![vec![t("a")], vec![t("b")]]);
+    let ins = |i| vec![CellPart::Inlines(vec![i])];
+    assert_eq!(header, vec![ins(t("a")), ins(t("b"))]);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0][0], vec![t("1")]);
+    assert_eq!(rows[0][0], ins(t("1")));
 }
 
 #[test]
@@ -816,4 +817,75 @@ fn extra_image_formats_embed_as_images() {
     }
     assert!(is_image_target("a/b.qoi"));
     assert!(!is_image_target("x.svg"));
+}
+
+/// Plan round-25 WP-2: the parts of table cell (`row`, `col`) of a one-table note.
+fn cell(src: &str, row: usize, col: usize) -> Cell {
+    let Block::Table { rows, .. } = one(src) else {
+        panic!("table")
+    };
+    rows[row][col].clone()
+}
+
+fn img(src: &str, alt: &str, width: Option<u32>) -> CellPart {
+    CellPart::Image {
+        src: src.into(),
+        alt: alt.into(),
+        width,
+        remote: false,
+        link: None,
+    }
+}
+
+#[test]
+fn table_image_only_cell_keeps_the_image() {
+    let c = cell("| a | b |\n| - | - |\n| x | ![[pic.png]] |\n", 0, 1);
+    assert_eq!(c, vec![img("pic.png", "pic.png", None)]);
+    let c = cell("| a |\n| - |\n| ![shot](s.jpg) |\n", 0, 0);
+    assert_eq!(c, vec![img("s.jpg", "shot", None)]);
+}
+
+#[test]
+fn table_mixed_cell_keeps_source_order() {
+    let c = cell("| a |\n| - |\n| before ![[p.png]] after [[N]] |\n", 0, 0);
+    let [
+        CellPart::Inlines(pre),
+        CellPart::Image { src, .. },
+        CellPart::Inlines(post),
+    ] = c.as_slice()
+    else {
+        panic!("{c:#?}")
+    };
+    assert_eq!(src, "p.png");
+    assert_eq!(inline_text(pre).trim(), "before");
+    assert!(matches!(post.last(), Some(Inline::WikiLink { target, .. }) if target == "N"));
+    assert_eq!(inline_text(post).trim(), "after N");
+}
+
+#[test]
+fn table_escaped_pipe_image_width() {
+    let c = cell("| a | b |\n| - | - |\n| ![[img.png\\|200]] | z |\n", 0, 0);
+    assert_eq!(c, vec![img("img.png", "img.png", Some(200))]);
+    let Block::Table { rows, .. } = one("| a | b |\n| - | - |\n| ![[img.png\\|200]] | z |\n")
+    else {
+        panic!("table")
+    };
+    assert_eq!(rows[0].len(), 2);
+}
+
+#[test]
+fn heading_image_still_lowers_to_alt_text() {
+    let b = one("# Title ![logo](l.png)\n");
+    let Block::Heading { inlines, .. } = b else {
+        panic!("heading")
+    };
+    assert_eq!(inline_text(&inlines), "Title logo");
+}
+
+#[test]
+fn images_reports_table_cell_images_in_order() {
+    let m =
+        lower("![](a.png)\n\n| h ![](b.png) |\n| - |\n| ![[c.png]] x ![[d.png]] |\n\n![](e.png)\n");
+    let srcs: Vec<String> = images(&m).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(srcs, ["a.png", "b.png", "c.png", "d.png", "e.png"]);
 }

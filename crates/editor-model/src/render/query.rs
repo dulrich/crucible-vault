@@ -1,7 +1,7 @@
 //! Read-only walks over a [`RenderModel`]: task lines, link targets, images, inline text.
 
 use super::lower::is_remote;
-use super::model::{Block, Inline, ListItem, RenderModel};
+use super::model::{Block, CellPart, Inline, ListItem, RenderModel};
 use crate::props::PropValue;
 
 /// Every host-note task line with its status, in document order (transclusions excluded).
@@ -122,8 +122,14 @@ fn collect_links(blocks: &[Block], out: &mut Vec<String>) {
                 inline_links(inlines, out);
             }
             Block::Table { header, rows, .. } => {
-                for c in header.iter().chain(rows.iter().flatten()) {
-                    inline_links(c, out);
+                for part in header.iter().chain(rows.iter().flatten()).flatten() {
+                    match part {
+                        CellPart::Inlines(inlines) => inline_links(inlines, out),
+                        CellPart::Image {
+                            link: Some(href), ..
+                        } if !is_remote(href) && !self_link(href) => out.push(href.clone()),
+                        CellPart::Image { .. } => {}
+                    }
                 }
             }
             Block::Image {
@@ -134,7 +140,8 @@ fn collect_links(blocks: &[Block], out: &mut Vec<String>) {
     });
 }
 
-/// Every image block's `(src, remote)`, in document order, including inside transclusions.
+/// Every image block's `(src, remote)`, in document order, including inside transclusions and
+/// (plan round-25 WP-2) table cells.
 pub fn images(model: &RenderModel) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     collect_images(&model.blocks, &mut out);
@@ -142,10 +149,16 @@ pub fn images(model: &RenderModel) -> Vec<(String, bool)> {
 }
 
 fn collect_images(blocks: &[Block], out: &mut Vec<(String, bool)>) {
-    walk_blocks(blocks, true, &mut |v| {
-        if let Visit::Block(Block::Image { src, remote, .. }) = v {
-            out.push((src.clone(), *remote));
+    walk_blocks(blocks, true, &mut |v| match v {
+        Visit::Block(Block::Image { src, remote, .. }) => out.push((src.clone(), *remote)),
+        Visit::Block(Block::Table { header, rows, .. }) => {
+            for part in header.iter().chain(rows.iter().flatten()).flatten() {
+                if let CellPart::Image { src, remote, .. } = part {
+                    out.push((src.clone(), *remote));
+                }
+            }
         }
+        _ => {}
     });
 }
 

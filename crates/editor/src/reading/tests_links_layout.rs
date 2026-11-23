@@ -307,7 +307,9 @@ fn table_cell_link_right_click_yields_the_link_menu() {
     else {
         panic!("no table");
     };
-    assert!(matches!(rows[0][1].as_slice(), [Inline::WikiLink { target, .. }] if target == "Nope"));
+    assert!(
+        matches!(rows[0][1].as_slice(), [editor_model::render::CellPart::Inlines(i)] if matches!(i.as_slice(), [Inline::WikiLink { target, .. }] if target == "Nope"))
+    );
     let want: HashSet<String> = ["Nope", "Gone"].map(String::from).into();
     assert_eq!(doc.unresolved, want);
     let names = |t: &Target| -> Vec<String> { items(t).into_iter().map(|(_, l)| l).collect() };
@@ -389,4 +391,51 @@ fn find_paint_follows_the_focused_pane_only() {
         "the other pane's view input carries no find paint"
     );
     drop(app.view());
+}
+
+/// Plan round-25 WP-2 (audit c1 M8, synthetic fixture): local images inside table cells are
+/// keyed and header-sized like top-level images, and an image laid out in a narrow cell never
+/// exceeds the cell width (an explicit `|N` is a maximum).
+#[test]
+fn table_cell_images_are_keyed_and_fit_the_cell() {
+    use iced::advanced::layout::Limits;
+    use iced::advanced::widget::Tree;
+
+    let (a, b) = (png(400, 200), png(60, 30));
+    let (_tmp, d) = setup(&[
+        (
+            "A.md",
+            b"| x | y |\n| - | - |\n| ![[a.png\\|200]] | t ![](b.png) |\n",
+        ),
+        ("a.png", &a),
+        ("b.png", &b),
+    ]);
+    let mut app = app_on(&d, "A.md");
+    reading(&mut app, "A.md", ViewMode::Reading);
+    let doc = app.reading.doc(&app.docs, "A.md").expect("doc");
+    assert_eq!(doc.images.get("a.png"), Some(&Some("a.png".to_owned())));
+    assert_eq!(doc.images.get("b.png"), Some(&Some("b.png".to_owned())));
+    let dims = app.reading.images.dims("a.png").expect("a.png sized");
+    assert_eq!((dims.width, dims.height), (400, 200));
+
+    let width = |el: iced::widget::Stack<'static, (), iced::Theme, Measure>, avail: f32| {
+        let mut el: iced::Element<'static, (), iced::Theme, Measure> =
+            iced::widget::container(el).width(iced::Length::Fill).into();
+        let mut tree = Tree::new(el.as_widget());
+        let limits = Limits::new(iced::Size::ZERO, iced::Size::new(avail, f32::INFINITY));
+        el.as_widget_mut()
+            .layout(&mut tree, &Measure, &limits)
+            .children()
+            .first()
+            .expect("image")
+            .size()
+            .width
+    };
+    // `|200` in a 120-wide cell shrinks to the cell; in a 500-wide cell it stays at 200.
+    assert!(width(super::view::sized_image(dims, Some(200), None), 120.0) <= 120.0);
+    assert_eq!(
+        width(super::view::sized_image(dims, Some(200), None), 500.0),
+        200.0
+    );
+    assert!(width(super::view::sized_image(dims, None, None), 150.0) <= 150.0);
 }

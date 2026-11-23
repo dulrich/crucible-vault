@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::props::{PropValue, Property};
-use crate::render::{Block, Fold, Inline, RenderModel};
+use crate::render::{Block, Cell, CellPart, Fold, Inline, RenderModel};
 use crate::typography::{Display, Sub, substitute};
 
 /// What goes between a run and the run before it in the copy text.
@@ -29,6 +29,8 @@ pub enum Sep {
     Cell,
     /// `: ` — a property value after its key (round-24 WP-2: the key is its own run).
     Colon,
+    /// A space — between the parts of one table cell (plan round-25 WP-2: text around an image).
+    Space,
 }
 
 impl Sep {
@@ -39,6 +41,7 @@ impl Sep {
             Self::Line => "\n",
             Self::Cell => "\t",
             Self::Colon => ": ",
+            Self::Space => " ",
         }
     }
 }
@@ -345,6 +348,22 @@ impl Walk<'_> {
         self.push(inlines_text(inlines), sep, false);
     }
 
+    /// Plan round-25 WP-2: a table cell — one run per part (an image's alt text is its copy
+    /// text, as a top-level image); an empty cell is one empty run. Parts after the first are
+    /// space-separated.
+    fn cell(&mut self, c: &Cell, sep: Sep) {
+        if c.is_empty() {
+            self.inlines(&[], sep);
+        }
+        for (i, part) in c.iter().enumerate() {
+            let sep = if i == 0 { sep } else { Sep::Space };
+            match part {
+                CellPart::Inlines(inlines) => self.inlines(inlines, sep),
+                CellPart::Image { alt, .. } => self.push_text(alt.clone(), Vec::new(), sep, true),
+            }
+        }
+    }
+
     /// `depth` = list nesting (0 = not in a list): runs inside a list are newline-separated.
     fn block(&mut self, b: &Block, depth: usize) {
         let sep = if depth > 0 { Sep::Line } else { Sep::Block };
@@ -377,11 +396,11 @@ impl Walk<'_> {
             }
             Block::Table { header, rows, .. } => {
                 for (i, c) in header.iter().enumerate() {
-                    self.inlines(c, if i == 0 { sep } else { Sep::Cell });
+                    self.cell(c, if i == 0 { sep } else { Sep::Cell });
                 }
                 for r in rows {
                     for (i, c) in r.iter().enumerate() {
-                        self.inlines(c, if i == 0 { Sep::Line } else { Sep::Cell });
+                        self.cell(c, if i == 0 { Sep::Line } else { Sep::Cell });
                     }
                 }
             }
@@ -536,6 +555,31 @@ mod tests {
 
     fn texts(rs: &[VisRun]) -> Vec<&str> {
         rs.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    /// Plan round-25 WP-2: an image in a table cell is its own image run carrying its alt text
+    /// (the copy text), space-separated from the cell's text; text-only cells are unchanged.
+    #[test]
+    fn table_cell_image_copies_as_alt_text() {
+        let m = lower("| a | b |\n| - | - |\n| x ![shot](s.png) y |  |\n");
+        let rs = visible_runs(&m);
+        assert_eq!(texts(&rs), ["a", "b", "x ", "shot", " y", ""]);
+        let seps: Vec<Sep> = rs.iter().map(|r| r.sep).collect();
+        assert_eq!(
+            seps,
+            [
+                Sep::Block,
+                Sep::Cell,
+                Sep::Line,
+                Sep::Space,
+                Sep::Space,
+                Sep::Cell
+            ]
+        );
+        assert_eq!(
+            rs.iter().map(|r| r.image).collect::<Vec<_>>(),
+            [false, false, false, true, false, false]
+        );
     }
 
     #[test]

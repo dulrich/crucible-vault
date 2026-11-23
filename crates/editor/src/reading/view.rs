@@ -1,7 +1,7 @@
 //! Drawing the render model with iced widgets (selectable text runs, `image`, `sensor`).
 
 use editor_model::props::{PropValue, Property};
-use editor_model::render::{Align, Block, Fold, Inline, ListItem, inline_text};
+use editor_model::render::{Align, Block, CellPart, Fold, Inline, ListItem, inline_text};
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{Space, button, column, container, image, row, rule, sensor, span, text};
 use iced::{Border, Element, Font, Length, Theme};
@@ -464,18 +464,19 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
             rows,
             alignments,
         } => {
-            let cell = |c: &'a Vec<Inline>, i: usize, bold: bool| -> Element<'a, Message> {
-                let align = match alignments.get(i) {
-                    Some(Align::Center) => iced::alignment::Horizontal::Center,
-                    Some(Align::Right) => iced::alignment::Horizontal::Right,
-                    _ => iced::alignment::Horizontal::Left,
+            let cell =
+                |c: &'a editor_model::render::Cell, i: usize, bold: bool| -> Element<'a, Message> {
+                    let align = match alignments.get(i) {
+                        Some(Align::Center) => iced::alignment::Horizontal::Center,
+                        Some(Align::Right) => iced::alignment::Horizontal::Right,
+                        _ => iced::alignment::Horizontal::Left,
+                    };
+                    container(cell_view(cx, c, bold))
+                        .padding(4)
+                        .width(Length::FillPortion(1))
+                        .align_x(align)
+                        .into()
                 };
-                container(inlines_view(cx, c, 15.0, None, bold))
-                    .padding(4)
-                    .width(Length::FillPortion(1))
-                    .align_x(align)
-                    .into()
-            };
             let mut lines: Vec<Element<'a, Message>> = vec![
                 row(header.iter().enumerate().map(|(i, c)| cell(c, i, true))).into(),
                 rule::horizontal(1).into(),
@@ -592,6 +593,43 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
             remote_card(cx, url, *kind)
         }
     }
+}
+
+/// Plan round-25 WP-2: a table cell's parts in source order — inline runs as text, images as
+/// the same element as a top-level [`Block::Image`] (one run slot each, as the visible walk
+/// assigns them). The cell's `FillPortion` width bounds each image: it shrinks to fit, and an
+/// explicit `|N` width is a maximum.
+fn cell_view<'a>(
+    cx: &Ctx<'a, '_>,
+    c: &'a editor_model::render::Cell,
+    bold: bool,
+) -> Element<'a, Message> {
+    if let [CellPart::Inlines(inlines)] = c.as_slice() {
+        return inlines_view(cx, inlines, 15.0, None, bold);
+    }
+    if c.is_empty() {
+        return inlines_view(cx, &[], 15.0, None, bold);
+    }
+    column(c.iter().map(|part| match part {
+        CellPart::Inlines(inlines) => inlines_view(cx, inlines, 15.0, None, bold),
+        CellPart::Image {
+            src,
+            alt,
+            width,
+            remote,
+            link,
+        } => {
+            cx.take_run();
+            let img = image_block(cx, src, alt, *width, *remote, link.as_deref());
+            let img = match link {
+                Some(href) => linked_image(cx, img, href, src, *remote),
+                None => img,
+            };
+            container(img).width(Length::Fill).into()
+        }
+    }))
+    .spacing(4)
+    .into()
 }
 
 /// Whether a task's item text is struck through (Crucible theme.css ~616-621: `[-]` only).

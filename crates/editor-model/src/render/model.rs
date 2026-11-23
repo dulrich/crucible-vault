@@ -63,8 +63,23 @@ pub struct ListItem {
     pub children: Vec<Block>,
 }
 
-/// A table cell's inlines.
-pub type Cell = Vec<Inline>;
+/// Plan round-25 WP-2: one part of a table cell, in source order — a maximal run of inlines,
+/// or an image carrying the same data as [`Block::Image`]. Lowering never emits two adjacent
+/// `Inlines` parts; a text-only cell is one `Inlines` part, an empty cell has no parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellPart {
+    Inlines(Vec<Inline>),
+    Image {
+        src: String,
+        alt: String,
+        width: Option<u32>,
+        remote: bool,
+        link: Option<String>,
+    },
+}
+
+/// A table cell's parts (inline runs and images, in source order).
+pub type Cell = Vec<CellPart>;
 
 /// A block.
 #[derive(Debug, Clone, PartialEq, Eq)]
