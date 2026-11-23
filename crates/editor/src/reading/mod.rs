@@ -549,12 +549,12 @@ impl ReadingStore {
         self.images.forget_dims_of(path);
     }
 
-    /// `tab` shows image `key`: pins it, and starts an off-thread load on a miss.
+    /// `tab` shows image `key`: pins it (copy `instance`), and starts an off-thread load on a miss.
     fn image_shown(
         &mut self,
         docs: &Docs,
         tab: &str,
-        view: u64,
+        (view, instance): (u64, usize),
         key: &str,
         width: f32,
         daemon: Option<&Arc<dyn DaemonClient>>,
@@ -571,7 +571,10 @@ impl ReadingStore {
             return Task::none();
         };
         let describe = self.describe_task(d, key);
-        let load = if self.images.show(&image_cache::view_owner(tab, view), key) {
+        let load = if self
+            .images
+            .show_at(&image_cache::view_owner(tab, view), key, instance)
+        {
             image_cache::load_task(
                 Arc::clone(d),
                 key.to_owned(),
@@ -842,17 +845,23 @@ fn update_store(
             tab,
             view,
             key,
+            instance,
             width,
         } => {
-            return store.image_shown(docs, &tab, view, &key, width, daemon);
+            return store.image_shown(docs, &tab, (view, instance), &key, width, daemon);
         }
         ReadingMsg::ImageDescribed { key, narrative } => {
             store.descriptions.insert(key, narrative);
         }
-        ReadingMsg::ImageHidden { tab, view, key } => {
+        ReadingMsg::ImageHidden {
+            tab,
+            view,
+            key,
+            instance,
+        } => {
             store
                 .images
-                .hide(&image_cache::view_owner(&tab, view), &key);
+                .hide_at(&image_cache::view_owner(&tab, view), &key, instance);
         }
     }
     Task::none()

@@ -315,10 +315,17 @@ pub enum ReadingMsg {
         /// The showing view (tab id): pins are per view (plan editor-feedback-round-2 WP-7).
         view: u64,
         key: String,
+        /// Which copy of `key` in the note (its run index): each copy pins on its own.
+        instance: usize,
         width: f32,
     },
     /// An image sensor left view.
-    ImageHidden { tab: String, view: u64, key: String },
+    ImageHidden {
+        tab: String,
+        view: u64,
+        key: String,
+        instance: usize,
+    },
     /// Plan round-24 WP-3: vault image `key`'s description arrived (`None` = none stored).
     ImageDescribed {
         key: String,

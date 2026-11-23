@@ -202,6 +202,35 @@ fn hide_and_owner_release_drop_handles() {
     assert_eq!(c.used_bytes(), 0);
 }
 
+/// A note that embeds one image twice: the copy scrolled away unpins only itself (its on_hide used
+/// to release the handle while the other copy was still on screen, which then stayed a
+/// placeholder: its sensor had already fired on_show), and a load in flight is kept for the
+/// copy still waiting.
+#[test]
+fn each_copy_of_an_image_pins_on_its_own() {
+    let mut c = ImageCache::with_budget(1 << 20);
+    assert!(c.show_at("t", "k", 3), "first copy starts the load");
+    assert!(!c.show_at("t", "k", 9), "second copy waits for it");
+    c.hide_at("t", "k", 3);
+    assert!(c.loaded("k", Some(fake_decoded(100))), "copy 9 still waits");
+    assert!(
+        !c.show_at("t", "k", 3),
+        "cached: copy 3 pins without a load"
+    );
+    c.hide_at("t", "k", 9);
+    assert!(c.contains("k"), "copy 3 is on screen");
+    assert_eq!(c.pins("k"), 1, "pins count owners, not copies");
+    assert!(!c.show_at("t", "k", 3), "a repeated on_show is idempotent");
+    c.hide_at("t", "k", 3);
+    assert!(!c.contains("k"), "the last copy hidden releases it");
+
+    c.show_at("t", "r", 1);
+    c.show_at("t", "r", 2);
+    c.loaded("r", Some(fake_decoded(100)));
+    c.release_owner("t");
+    assert!(c.is_empty(), "owner release drops every copy's pin");
+}
+
 #[test]
 fn decode_downscales_to_display_width() {
     let d = decode(&png(200, 100), 64).expect("decode");
@@ -221,6 +250,7 @@ fn show_and_load(app: &mut App, d: &Arc<dyn DaemonClient>, path: &str, key: &str
         tab: path.to_owned(),
         view: 1,
         key: key.to_owned(),
+        instance: 0,
         width: 300.0,
     }));
     assert_eq!(app.reading.images.pending_len(), 1, "a load started");
@@ -255,6 +285,7 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
         tab: "A.md".into(),
         view: 1,
         key: "https://host/r.png".into(),
+        instance: 0,
         width: 100.0,
     }));
     assert_eq!(app.reading.images.pending_len(), 0);

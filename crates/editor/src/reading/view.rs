@@ -537,8 +537,8 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
             link,
         } => {
             // Plan round-5 WP-7: an image holds a run slot (its alt text is copy text).
-            cx.take_run();
-            let img = image_block(cx, src, alt, *width, *remote, link.as_deref());
+            let instance = cx.take_run().0;
+            let img = image_block(cx, instance, src, alt, *width, *remote, link.as_deref());
             match link {
                 Some(href) => linked_image(cx, img, href, src, *remote),
                 None => img,
@@ -619,8 +619,8 @@ fn cell_view<'a>(
             remote,
             link,
         } => {
-            cx.take_run();
-            let img = image_block(cx, src, alt, *width, *remote, link.as_deref());
+            let instance = cx.take_run().0;
+            let img = image_block(cx, instance, src, alt, *width, *remote, link.as_deref());
             let img = match link {
                 Some(href) => linked_image(cx, img, href, src, *remote),
                 None => img,

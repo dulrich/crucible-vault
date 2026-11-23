@@ -144,6 +144,7 @@ pub(super) fn pdf_embed<'a>(
 
 pub(super) fn image_block<'a>(
     cx: &Ctx<'a, '_>,
+    instance: usize,
     src: &'a str,
     alt: &'a str,
     width: Option<u32>,
@@ -256,6 +257,7 @@ pub(super) fn image_block<'a>(
                 tab: shown_tab.clone(),
                 view,
                 key: shown_key.clone(),
+                instance,
                 width: width.map_or(size.width, |w| w as f32),
             })
         })
@@ -263,6 +265,7 @@ pub(super) fn image_block<'a>(
             tab,
             view,
             key: key.clone(),
+            instance,
         }));
     // plan editor-round-4 WP-4: right-click → Copy image / Copy path.
     // Plan round-6 WP-3: a linked image's menu is attached by [`linked_image`] instead.

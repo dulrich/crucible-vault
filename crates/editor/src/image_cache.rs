@@ -154,12 +154,18 @@ pub fn sensor_margin(width: f32, height: f32) -> f32 {
 /// Extra anticipate distance beyond the element's own extent.
 const SENSOR_SLACK: f32 = 256.0;
 
+/// One pin: an owner (see [`view_owner`]) and the instance of the image it shows there. A note
+/// that embeds one image twice pins it once per copy (Reading passes the copy's run index), so
+/// the copy scrolled away unpins only itself, never the copy still on screen. Other surfaces
+/// show one copy, instance 0.
+type Pin = (String, usize);
+
 #[derive(Debug)]
 struct Entry {
     handle: Handle,
     bytes: usize,
     last_used: u64,
-    owners: HashSet<String>,
+    owners: HashSet<Pin>,
     /// A PDF page bitmap admitted under [`ImageCache::reserve`]: counted by
     /// [`ImageCache::pdf_bytes`] while resident (WP-R1, review E3).
     pdf: bool,
@@ -173,7 +179,7 @@ pub struct ImageCache {
     tick: u64,
     entries: HashMap<String, Entry>,
     /// Keys with a load in flight, and who asked.
-    pending: HashMap<String, HashSet<String>>,
+    pending: HashMap<String, HashSet<Pin>>,
     /// WP-R1 (review E3): projected bytes of PDF page loads in flight, by key. A reservation
     /// lives while someone waits for the load; [`Self::loaded`] transfers it to the resident
     /// entry, and [`Self::hide`] / [`Self::retain_owner`] release it with the last waiter.
@@ -281,7 +287,13 @@ impl ImageCache {
 
     /// Owners pinning `key` (0 = absent).
     pub fn pins(&self, key: &str) -> usize {
-        self.entries.get(key).map_or(0, |e| e.owners.len())
+        self.entries.get(key).map_or(0, |e| {
+            e.owners
+                .iter()
+                .map(|(o, _)| o)
+                .collect::<HashSet<_>>()
+                .len()
+        })
     }
 
     /// WP-R1 (review E3): reserves `bytes` for the PDF page load of `key` just started (a
@@ -331,29 +343,41 @@ impl ImageCache {
     /// `owner` shows `key`: pins a hit (and touches it), or returns `true` when the caller must
     /// start a load (none cached and none in flight).
     pub fn show(&mut self, owner: &str, key: &str) -> bool {
+        self.show_at(owner, key, 0)
+    }
+
+    /// [`Self::show`] for copy `instance` of `key` in `owner` (each copy pins on its own).
+    pub fn show_at(&mut self, owner: &str, key: &str, instance: usize) -> bool {
+        let pin = (owner.to_owned(), instance);
         self.tick += 1;
         if let Some(e) = self.entries.get_mut(key) {
             e.last_used = self.tick;
-            e.owners.insert(owner.to_owned());
+            e.owners.insert(pin);
             return false;
         }
         let waiting = self.pending.entry(key.to_owned()).or_default();
         let start = waiting.is_empty();
-        waiting.insert(owner.to_owned());
+        waiting.insert(pin);
         start
     }
 
     /// `owner` no longer shows `key` (sensor `on_hide`): unpins; an unpinned entry is released.
     pub fn hide(&mut self, owner: &str, key: &str) {
+        self.hide_at(owner, key, 0);
+    }
+
+    /// [`Self::hide`] for copy `instance` of `key` in `owner`: the other copies keep their pins.
+    pub fn hide_at(&mut self, owner: &str, key: &str, instance: usize) {
+        let pin = (owner.to_owned(), instance);
         if let Some(w) = self.pending.get_mut(key) {
-            w.remove(owner);
+            w.remove(&pin);
             if w.is_empty() {
                 self.reserved.remove(key);
             }
         }
         let release = match self.entries.get_mut(key) {
             Some(e) => {
-                e.owners.remove(owner);
+                e.owners.remove(&pin);
                 e.owners.is_empty()
             }
             None => false,
@@ -378,7 +402,7 @@ impl ImageCache {
             return;
         }
         for (k, w) in &mut self.pending {
-            w.retain(|o| !owners.contains(o));
+            w.retain(|(o, _)| !owners.contains(o));
             if w.is_empty() {
                 self.reserved.remove(k);
             }
@@ -386,7 +410,7 @@ impl ImageCache {
         let mut freed = Vec::new();
         for (k, e) in &mut self.entries {
             let pinned = !e.owners.is_empty();
-            e.owners.retain(|o| !owners.contains(o));
+            e.owners.retain(|(o, _)| !owners.contains(o));
             if pinned && e.owners.is_empty() {
                 freed.push(k.clone());
             }
@@ -402,11 +426,15 @@ impl ImageCache {
     /// the tree across the rename, so they never re-fire `on_show`: releasing the pins instead
     /// evicted the images for good (blank until the note was reopened).
     pub fn rename_owner(&mut self, from: &str, to: &str) {
-        let rekey = |set: &mut HashSet<String>| {
-            let moved: Vec<String> = set.iter().filter(|o| owned_by(o, from)).cloned().collect();
-            for o in moved {
-                set.remove(&o);
-                set.insert(format!("{to}{}", &o[from.len()..]));
+        let rekey = |set: &mut HashSet<Pin>| {
+            let moved: Vec<Pin> = set
+                .iter()
+                .filter(|(o, _)| owned_by(o, from))
+                .cloned()
+                .collect();
+            for (o, i) in moved {
+                set.remove(&(o.clone(), i));
+                set.insert((format!("{to}{}", &o[from.len()..]), i));
             }
         };
         for w in self.pending.values_mut() {
@@ -421,7 +449,7 @@ impl ImageCache {
     pub fn retain_owner(&mut self, owner: &str, keep: &HashSet<String>) {
         for (k, w) in &mut self.pending {
             if !keep.contains(k) {
-                w.retain(|o| !owned_by(o, owner));
+                w.retain(|(o, _)| !owned_by(o, owner));
                 if w.is_empty() {
                     self.reserved.remove(k);
                 }
@@ -432,7 +460,7 @@ impl ImageCache {
             .iter_mut()
             .filter(|(k, _)| !keep.contains(*k))
             .filter_map(|(k, e)| {
-                e.owners.retain(|o| !owned_by(o, owner));
+                e.owners.retain(|(o, _)| !owned_by(o, owner));
                 e.owners.is_empty().then(|| k.clone())
             })
             .collect();

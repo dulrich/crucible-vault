@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Editor: in a note that embeds the same image more than once, scrolling one copy out of view no longer turns a copy still on screen into a placeholder. Each copy now keeps the image loaded on its own.
+
 ## 1.4.0 — 2026-11-22
 
 ### Added
