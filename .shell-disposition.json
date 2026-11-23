@@ -1,6 +1,7 @@
 {
   "exclude": [],
   "entries": [
+    {"path":"docs/spikes/image-codecs/measure.sh","disposition":"sh","modes":["exec"],"strict":"required","reason":"throwaway spike script (plan round-25 measurement); spikes may stay legacy"},
     {"path":"deploy/migrations/local/0018-retire-oneshot-actions.sh","disposition":"lib-bash","modes":["source"],"strict":"legacy","legacy-findings":0},
     {"path":"deploy/migrations/local/0019-describe-retry-length.sh","disposition":"lib-bash","modes":["source"],"strict":"legacy","legacy-findings":0},
     {"path":"deploy/migrations/local/0020-intake-by-source-view.sh","disposition":"lib-bash","modes":["source"],"strict":"legacy","legacy-findings":0},

@@ -1,0 +1,5 @@
+base size=51870592 build_s=55 new_crates=0 []
+nodep size=52163504 build_s=14 new_crates=0 []
+qoi size=52190520 build_s=13 new_crates=1 [qoi ]
+tiff size=53085744 build_s=14 new_crates=3 [fax qoi tiff ]
+exr size=54076400 build_s=27 new_crates=12 [bit_field exr fax lebe num-complex pulp pulp-wasm-simd-flag qoi raw-cpuid reborrow tiff zune-inflate ]
