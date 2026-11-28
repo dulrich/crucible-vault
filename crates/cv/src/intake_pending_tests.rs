@@ -32,6 +32,7 @@ fn vault(root: &Path) -> Sources {
         index_db: root.join("index.db"),
         state_db: root.join("state.db"),
         search_db: root.join("search.db"),
+        config_dir: root.join("config"),
     }
 }
 
@@ -89,13 +90,13 @@ fn report_with_and_without_the_outcome_table_and_leaves_bytes_unchanged() {
         text.contains("\nintake notes (last 30 days): 3 blog=1 mail=1 youtube=0 clip=1\n"),
         "{text}"
     );
-    //                         done pending skipped unfinished failed stuck
-    assert_eq!(row(&text, "enrich"), [1, 0, 0, 1, 0, 0]);
-    assert_eq!(row(&text, "auto_file"), [0, 1, 0, 0, 0, 0]);
-    assert_eq!(row(&text, "localize"), [2, 1, 0, 0, 0, 0]);
-    assert_eq!(row(&text, "image_describe"), [0, 0, 3, 0, 0, 0]);
-    assert_eq!(row(&text, "finalize"), [0, 0, 3, 0, 0, 0]);
-    assert_eq!(row(&text, "index"), [0, 3, 0, 0, 0, 0]);
+    //                         done pending skipped unfinished failed exhausted stuck
+    assert_eq!(row(&text, "enrich"), [1, 0, 0, 1, 0, 0, 0]);
+    assert_eq!(row(&text, "auto_file"), [0, 1, 0, 0, 0, 0, 0]);
+    assert_eq!(row(&text, "localize"), [2, 1, 0, 0, 0, 0, 0]);
+    assert_eq!(row(&text, "image_describe"), [0, 0, 3, 0, 0, 0, 0]);
+    assert_eq!(row(&text, "finalize"), [0, 0, 3, 0, 0, 0, 0]);
+    assert_eq!(row(&text, "index"), [0, 3, 0, 0, 0, 0, 0]);
     assert!(
         text.contains("mail Mail/m.md: enrich=unfinished index=pending\n"),
         "{text}"
@@ -115,7 +116,8 @@ fn report_with_and_without_the_outcome_table_and_leaves_bytes_unchanged() {
     assert_unchanged(&before, &snapshot(dir.path()));
     std::fs::remove_file(&src.state_db).unwrap();
 
-    // The current schema with a recorded index failure for the mail note.
+    // The current schema with a recorded index failure for the mail note, judged on other facts
+    // (plan intake-stage-jobs WP-2 (c): a stale fingerprint reads pending).
     {
         let mut s = StateDb::open(&src.state_db, 1, QueueConfig::default()).unwrap();
         let id = i64::try_from(s.note_id_bind("Mail/m.md").unwrap().0).unwrap();
@@ -125,7 +127,7 @@ fn report_with_and_without_the_outcome_table_and_leaves_bytes_unchanged() {
             outcome: "failed".into(),
             reason: "embedder down".into(),
             attempts: 2,
-            fingerprint: String::new(),
+            fingerprint: "v1:stale".into(),
             first_ms: 1,
             updated_ms: 1,
         })
@@ -134,11 +136,52 @@ fn report_with_and_without_the_outcome_table_and_leaves_bytes_unchanged() {
     let before = snapshot(dir.path());
     let text = report(&src, now, 30, true).unwrap();
     assert_unchanged(&before, &snapshot(dir.path()));
-    assert_eq!(row(&text, "index"), [0, 2, 0, 0, 1, 0]);
+    assert_eq!(row(&text, "index"), [0, 3, 0, 0, 0, 0, 0]);
     assert!(
-        text.contains("mail Mail/m.md: enrich=unfinished index=failed(2)\n"),
+        text.contains("mail Mail/m.md: enrich=unfinished index=pending\n"),
         "{text}"
     );
+    // The same failure on the current facts reads failed, and exhausted at the cap.
+    let current = {
+        let reader = Reader::open_current(&src.index_db).unwrap();
+        let st = StateReader::open(&src.state_db).unwrap();
+        let indexed = IndexedHashes::open_read_only(&src.search_db).unwrap();
+        let config = ConfigSet::new();
+        let env = FactEnv {
+            vault: &src.vault,
+            config: &config,
+            reader: &reader,
+            state: Some(&st),
+            indexed: Some(&indexed),
+        };
+        let v = note_facts::note_view(&env, "Mail/m.md").unwrap().unwrap();
+        cv_ingest::stage::fingerprint(Stage::Index, &v.facts)
+    };
+    for (attempts, want, line) in [
+        (2, [0, 2, 0, 0, 1, 0, 0], "index=failed(2)"),
+        (3, [0, 2, 0, 0, 0, 1, 0], "index=exhausted(3)"),
+    ] {
+        let mut s = StateDb::open(&src.state_db, 1, QueueConfig::default()).unwrap();
+        let id = i64::try_from(s.note_id_bind("Mail/m.md").unwrap().0).unwrap();
+        s.upsert_stage_outcome(&StageOutcomeRow {
+            note_id: id,
+            stage: "index".into(),
+            outcome: "failed".into(),
+            reason: "embedder down".into(),
+            attempts,
+            fingerprint: current.clone(),
+            first_ms: 1,
+            updated_ms: 1,
+        })
+        .unwrap();
+        drop(s);
+        let text = report(&src, now, 30, true).unwrap();
+        assert_eq!(row(&text, "index"), want);
+        assert!(
+            text.contains(&format!("mail Mail/m.md: enrich=unfinished {line}\n")),
+            "{text}"
+        );
+    }
 
     // The window: a clock 31 days on sees nothing.
     let later = report(&src, now + 31 * DAY_MS, 30, false).unwrap();

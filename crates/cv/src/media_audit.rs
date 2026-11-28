@@ -234,6 +234,33 @@ fn top_folder(rel: &str) -> &str {
 }
 
 /// Counts of one note's remote refs by kind: (images, video, audio, pdf).
+/// The remote image embeds of `text` (the refs [`note_counts`] counts as images), as written:
+/// the localize stage's fingerprint is their set (plan intake-stage-jobs WP-2).
+pub(crate) fn remote_image_refs(text: &str) -> Vec<String> {
+    let image = |k: EffectiveKind| {
+        matches!(
+            k,
+            EffectiveKind::Kind(RemoteKind::Image | RemoteKind::Unknown)
+        )
+    };
+    let mut out = Vec::new();
+    for m in parse_attachment_refs(text) {
+        if m.is_embed
+            && m.is_remote
+            && m.syntax == cv_text::attachments::Syntax::Md
+            && image(effective_kind(&m.link, None))
+        {
+            out.push(m.link.clone());
+        }
+    }
+    for h in scan_html_media(text) {
+        if image(effective_kind(&h.src, Some(h.tag))) {
+            out.push(h.src.clone());
+        }
+    }
+    out
+}
+
 pub(crate) fn note_counts(text: &str) -> (u64, u64, u64, u64) {
     let (mut img, mut vid, mut aud, mut pdf) = (0_u64, 0_u64, 0_u64, 0_u64);
     let mut count = |k: EffectiveKind| match k {

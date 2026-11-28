@@ -23,6 +23,12 @@ pub const EVIDENCE_SEED: &str = "rss-seed";
 /// Every learned row as plain data (an unreadable table reads as none, with a warning).
 #[must_use]
 pub fn rows(state: &StateDb) -> Vec<LearnedRow> {
+    rows_from(state)
+}
+
+/// [`rows`] over any read-only intake view (the daemon-free report reads a `StateReader`).
+#[must_use]
+pub fn rows_from<S: cv_state::IntakeRead + ?Sized>(state: &S) -> Vec<LearnedRow> {
     match state.learned_hosts() {
         Ok(v) => v
             .into_iter()

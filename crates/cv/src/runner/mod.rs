@@ -18,6 +18,7 @@ mod holds;
 mod rematch;
 mod rpc;
 mod schedule;
+mod stage_guard;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -49,6 +50,7 @@ use execute::execute_steps;
 pub use holds::HoldsView;
 use holds::{Running, RunningJob};
 pub use rpc::{actions_list, run_action};
+pub use stage_guard::ModelGuard;
 
 /// Maximum `run_action` nesting (pin 10).
 pub const MAX_CHAIN_DEPTH: usize = 4;
@@ -155,8 +157,8 @@ pub fn note_resource_key(id: cv_protocol::NoteId) -> String {
 }
 
 /// Whether a stage is still runnable for a note, asked on a seam job's first claim (no
-/// checkpoint yet). WP-2 supplies the stage model's answer through [`Runner::set_stage_guard`];
-/// until then [`AlwaysRun`].
+/// checkpoint yet). The daemon installs the stage model's [`ModelGuard`] through
+/// [`Runner::set_stage_guard`]; a bare runner (tests) keeps [`AlwaysRun`].
 pub trait StageGuard: Send + Sync {
     /// `stage` (an [`cv_actions::STAGE_NAMES`] name) for the job's note; `false` settles the
     /// job Done with no attempt.
@@ -359,7 +361,7 @@ pub(crate) struct Inner {
     /// The one shared `semsearch` handle per process (Decision 7).
     search: cv_search::SearchDb,
     config: RwLock<Arc<ConfigSet>>,
-    /// The stage-job guard (WP-2 injects the stage model's; [`AlwaysRun`] until then).
+    /// The stage-job guard (the daemon installs [`ModelGuard`]; [`AlwaysRun`] otherwise).
     stage_guard: RwLock<Arc<dyn StageGuard>>,
     wake: Notify,
     /// Every claimed job in this runner (`job id -> RunningJob`), inserted at claim and removed
@@ -432,7 +434,7 @@ impl Runner {
         self.inner.retag_queued_stage_jobs();
     }
 
-    /// Installs the stage-job guard (the injection point WP-2 wires the stage model into).
+    /// Installs the stage-job guard (the daemon installs [`ModelGuard`]; tests inject their own).
     pub fn set_stage_guard(&self, g: Arc<dyn StageGuard>) {
         *write(&self.inner.stage_guard) = g;
     }

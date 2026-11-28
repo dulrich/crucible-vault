@@ -284,6 +284,13 @@ impl Daemon {
             search_db: shared.config.search_db.clone(),
             data_home: shared.config.data_home.clone(),
         });
+        // Plan intake-stage-jobs WP-2: a fresh stage job runs only when the stage model admits it.
+        runner.set_stage_guard(Arc::new(crate::runner::ModelGuard::new(
+            Arc::clone(&shared.state),
+            shared.vault_root.clone(),
+            shared.config.index_db.clone(),
+            shared.config.search_db.clone(),
+        )));
         runner.reload_config();
         // Plan intake-foundations WP-3: learned publication hosts from recorded blog rows (local
         // database only, idempotent).

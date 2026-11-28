@@ -632,3 +632,40 @@ async fn child_depth_four_and_cycle_are_refused_as_today() {
     assert!(j.error.unwrap().contains("cycle"));
     let _ = &f.dir;
 }
+
+/// Plan intake-stage-jobs WP-2: the stage model's guard. A fresh seam job whose stage is done
+/// for its note (no remote image left) settles without running; one whose stage is pending runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_guard_skips_a_done_stage_and_runs_a_pending_one() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let f = fx(counting(&calls, false), LOC);
+    let w = |p: &str, s: &str| {
+        let full = f.dir.path().join(p);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, s).unwrap();
+    };
+    w(
+        "Blog/done.md",
+        "---\npost-id: https://b.example/d\n---\nbody\n",
+    );
+    w(
+        "Blog/todo.md",
+        "---\npost-id: https://b.example/t\n---\n![](https://img.example/p.png)\n",
+    );
+    drop(cv_index::Index::create(f.dir.path(), &f.dir.path().join("index.db")).unwrap());
+    f.runner.set_stage_guard(Arc::new(ModelGuard::new(
+        Arc::clone(&f.state),
+        f.dir.path().to_path_buf(),
+        f.dir.path().join("index.db"),
+        f.dir.path().join("search.db"),
+    )));
+    f.bind("Blog/done.md");
+    f.bind("Blog/todo.md");
+    let done = id_of(&f.admit("stage-x", "Blog/done.md"));
+    assert_eq!(f.claim_run().await.as_deref(), Some(done.as_str()));
+    assert_eq!(f.job(&done).status, DbStatus::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "a done stage never runs");
+    let todo = id_of(&f.admit("stage-x", "Blog/todo.md"));
+    assert_eq!(f.claim_run().await.as_deref(), Some(todo.as_str()));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "a pending stage runs");
+}

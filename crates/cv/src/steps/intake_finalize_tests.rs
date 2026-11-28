@@ -278,3 +278,83 @@ fn missing_note_is_note_gone() {
     let r = e.exec_with(&step, &Map::new(), &ActionContext::default(), &vars);
     assert_eq!(super::testkit::note_gone(r), "stack/gone.md");
 }
+
+fn decision(e: &StepEnv, path: &str, text: &str) -> super::intake_finalize::Decision {
+    let db = e.state.lock().unwrap();
+    super::intake_finalize::decide(&e.config, &*db, path, text, None).unwrap()
+}
+
+/// Plan intake-stage-jobs WP-2: an alias-only tracker match (a key-matched row not linked yet)
+/// and a linked row with a tick left both make a non-empty decision (Finalize pending), and the
+/// decision writes nothing.
+#[test]
+fn decision_alias_only_and_linked_with_a_tick_left_are_not_empty() {
+    let text = format!(
+        "---\nsource: https://blog.example/p?utm_source=x\n---\n{}\n",
+        words(400)
+    );
+    let e = env(&[("Blog/p.md", text.clone())]);
+    add(&e, "blog", "p", "https://blog.example/p", None, None);
+    let d = decision(&e, "Blog/p.md", &text);
+    assert_eq!(d.rows.len(), 1);
+    assert!(d.rows[0].link && !d.is_empty(), "{d:?}");
+    assert_eq!(
+        row(&e, "blog", "p").0.note_path,
+        None,
+        "decide never writes"
+    );
+
+    let e = env(&[("Blog/q.md", text.clone())]);
+    add(
+        &e,
+        "blog",
+        "q",
+        "https://blog.example/q",
+        Some("Blog/q.md"),
+        None,
+    );
+    let d = decision(&e, "Blog/q.md", &text);
+    assert!(!d.rows[0].link && d.rows[0].tick && !d.is_empty(), "{d:?}");
+    assert_eq!(row(&e, "blog", "q").1, None, "still open");
+}
+
+/// A linked, unchanged open stub (its evidence already stored, not complete) is an empty
+/// decision even though applying it re-writes that evidence; new evidence (the note now says
+/// `complete: true`) makes it non-empty.
+#[test]
+fn decision_on_a_linked_unchanged_open_stub_is_empty_until_new_evidence() {
+    let stub = "---\nsource: https://blog.example/s\naccess: paid\ncomplete: false\n---\nteaser\n";
+    let e = env(&[("Blog/s.md", stub.to_owned())]);
+    add(
+        &e,
+        "blog",
+        "s",
+        "https://blog.example/s",
+        Some("Blog/s.md"),
+        None,
+    );
+    e.state
+        .lock()
+        .unwrap()
+        .finalize_tracker_item(
+            "blog",
+            "k",
+            "s",
+            Some(cv_state::TrackerEvidence {
+                access: Some("paid"),
+                complete: Some(false),
+                full_word_count: None,
+            }),
+            false,
+        )
+        .unwrap();
+    let d = decision(&e, "Blog/s.md", stub);
+    assert!(d.is_empty(), "{d:?}");
+    // Applying it (the step) still leaves the row open and unchanged.
+    run_on(&e, "Blog/s.md");
+    let (r, status) = row(&e, "blog", "s");
+    assert_eq!((r.complete, status), (Some(false), None));
+    let full = stub.replace("complete: false", "complete: true");
+    let d = decision(&e, "Blog/s.md", &full);
+    assert!(!d.is_empty() && d.rows[0].tick, "{d:?}");
+}

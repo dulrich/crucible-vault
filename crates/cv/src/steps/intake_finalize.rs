@@ -24,7 +24,9 @@
 //!
 //! Writes `state.db` only, never a note; holds `intake::identity` (step-intrinsic). A note with
 //! no resolvable row is a no-op success. The per-note core is [`finalize_note`] (also run by
-//! `intake_reconcile`, with a dry-run flag and a one-kind filter). Outcome vars are aggregates only: `rows`, `linked`,
+//! `intake_reconcile`, with a dry-run flag and a one-kind filter): the read-only [`decide`] and its
+//! [`apply`] (plan intake-stage-jobs WP-2; the stage model's Finalize fact is "the decision is
+//! empty"). Outcome vars are aggregates only: `rows`, `linked`,
 //! `ticked`, `no_evidence`. Nothing here is adopted from Crucible (its tracker ticks were manual).
 
 use std::collections::BTreeSet;
@@ -33,7 +35,7 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::Access;
 use cv_ingest::identity::{NoteFacts, note_keys};
 use cv_note::{FrontmatterDoc, JsValue, transcript_evidence};
-use cv_state::{TrackerEvidence, TrackerItem};
+use cv_state::{IntakeRead, TrackerEvidence, TrackerItem};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -109,18 +111,17 @@ fn note_path(ctx: &StepCtx<'_>, path: Option<&str>) -> Result<String, StepError>
     target_path(ctx, path)
 }
 
-/// The tracker rows the note satisfies (see the module doc, step 1), deduplicated.
-fn resolve_rows(
-    ctx: &StepCtx<'_>,
+/// The tracker rows the note satisfies (see the module doc, step 1), deduplicated. Read-only.
+fn resolve_rows<D: IntakeRead + ?Sized>(
+    config: &ConfigSet,
+    db: &D,
     path: &str,
     sources: &[String],
     post_ids: &[String],
     video: Option<&str>,
 ) -> Result<Vec<TrackerItem>, StepError> {
-    let pubs = crate::supersede::publication_hosts(
-        ctx.config.sources(),
-        &crate::learned_hosts::rows(&ctx.state()),
-    );
+    let pubs =
+        crate::supersede::publication_hosts(config.sources(), &crate::learned_hosts::rows_from(db));
     let keys = note_keys(
         &NoteFacts {
             sources,
@@ -131,9 +132,8 @@ fn resolve_rows(
         None,
     );
     let values: Vec<String> = sources.iter().chain(post_ids).cloned().collect();
-    let db = ctx.state();
     let mut rows = db.tracker_items_for_note(path)?;
-    let by_key = crate::supersede::tracker_rows_by_keys(&db, &values, &keys, &pubs)?;
+    let by_key = crate::supersede::tracker_rows_by_keys(db, &values, &keys, &pubs)?;
     if rows.is_empty() {
         rows = by_key;
     } else {
@@ -170,28 +170,63 @@ fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
 /// A tracker row's key: `(source_kind, source_key, item_id)`.
 pub(crate) type RowKey = (String, String, String);
 
-/// The finalize core, shared with `intake_reconcile` (plan intake-followups-mail-youtube WP-5):
-/// resolves the rows `text` (the note at `path`) satisfies, links them and ticks them per the
-/// module doc.
-///
-/// - `only_kind` limits the rows to one `source_kind` (reconcile attributes counts per phase);
-///   `None` takes every resolved row (the step).
-/// - `dry` computes every count and writes nothing.
-/// - `pre_linked` lists rows an earlier reconcile phase already counted as linked (so a dry run,
-///   whose database still shows a NULL `note_path`, counts the same as a real run).
-pub(crate) fn finalize_note(
-    ctx: &StepCtx<'_>,
+/// What finalize would do for one resolved row (read-only; [`decide`]).
+#[derive(Debug, Clone)]
+pub(crate) struct RowDecision {
+    /// The row as read.
+    pub(crate) row: TrackerItem,
+    /// The row has no `note_path` yet: it gets linked to the note.
+    pub(crate) link: bool,
+    /// The row's status is still open (a set status is never changed; nothing else applies).
+    pub(crate) open: bool,
+    /// The evidence write (`access`, `complete`) for an open `blog`/`mail` or ticked `youtube`
+    /// row.
+    pub(crate) evidence: Option<(Option<String>, Option<bool>)>,
+    /// The evidence differs from what the row holds.
+    pub(crate) evidence_changed: bool,
+    /// The row gets ticked.
+    pub(crate) tick: bool,
+}
+
+impl RowDecision {
+    /// Whether this row's decision changes anything (a link, new evidence, or a tick).
+    pub(crate) fn is_delta(&self) -> bool {
+        self.link || self.evidence_changed || self.tick
+    }
+}
+
+/// The finalize decision for one note: every resolved row with what applying it would change
+/// (plan intake-stage-jobs WP-2: the stage model's Finalize fact is [`Decision::is_empty`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Decision {
+    /// One entry per resolved row, in resolution order.
+    pub(crate) rows: Vec<RowDecision>,
+}
+
+impl Decision {
+    /// Nothing left to do: no link to add, no evidence that differs, no tick. Re-writing
+    /// unchanged evidence on an open row that stays open is not a decision.
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.rows.iter().any(RowDecision::is_delta)
+    }
+}
+
+/// The read-only half of [`finalize_note`]: resolves the rows `text` (the note at `path`)
+/// satisfies and decides, per row, the link, the evidence and the tick of the module doc.
+/// `only_kind` limits the rows to one `source_kind`. Writes nothing.
+pub(crate) fn decide<D: IntakeRead + ?Sized>(
+    config: &ConfigSet,
+    db: &D,
     path: &str,
     text: &str,
     only_kind: Option<&str>,
-    dry: bool,
-    pre_linked: &BTreeSet<RowKey>,
-) -> Result<Vars, StepError> {
+) -> Result<Decision, StepError> {
     let doc = FrontmatterDoc::new(text);
     let sources = strings(&doc, "source");
     let video = own_video_id(&sources, &doc);
     let mut rows = resolve_rows(
-        ctx,
+        config,
+        db,
         path,
         &sources,
         &strings(&doc, "post-id"),
@@ -200,84 +235,105 @@ pub(crate) fn finalize_note(
     if let Some(k) = only_kind {
         rows.retain(|r| r.source_kind == k);
     }
-    let mut v = Vars {
-        rows: u32::try_from(rows.len()).unwrap_or(u32::MAX),
-        ..Vars::default()
-    };
-    let evidence = transcript_evidence(text, cleanup_kind(ctx.config, &strings(&doc, "tags")));
+    let evidence = transcript_evidence(text, cleanup_kind(config, &strings(&doc, "tags")));
     let note_access = doc.get_str("access");
     let note_complete = doc.get_bool("complete");
-    let complete_percent = ctx.config.pipelines().blogs.complete_percent;
+    let complete_percent = config.pipelines().blogs.complete_percent;
+    let mut out = Decision::default();
     for row in rows {
-        let (kind, key, id) = (&row.source_kind, &row.source_key, &row.item_id);
-        let status = {
-            let mut db = ctx.state();
-            if row.note_path.is_none() {
-                let counted = pre_linked.contains(&(kind.clone(), key.clone(), id.clone()));
-                if dry {
-                    if !counted {
-                        v.linked += 1;
+        let status = db.tracker_item_status(&row.source_kind, &row.source_key, &row.item_id)?;
+        let mut d = RowDecision {
+            link: row.note_path.is_none(),
+            open: matches!(status, Some(None)),
+            evidence: None,
+            evidence_changed: false,
+            tick: false,
+            row,
+        };
+        if d.open {
+            let row = &d.row;
+            match row.source_kind.as_str() {
+                "youtube" => {
+                    if video.as_deref() == Some(row.item_id.as_str()) && evidence.is_some() {
+                        d.evidence = Some((row.access.clone(), Some(true)));
+                        d.evidence_changed = row.complete != Some(true);
+                        d.tick = true;
                     }
-                } else if db.set_tracker_note_path(kind, key, id, path)? {
+                }
+                "blog" | "mail" => {
+                    let access = note_access.clone().or_else(|| row.access.clone());
+                    let complete = note_complete.or_else(|| {
+                        let markers: Vec<String> = config
+                            .sources()
+                            .by_feed(&row.source_key)
+                            .map(|b| b.paywall_markers.clone())
+                            .unwrap_or_default();
+                        body_verdict(
+                            access.as_deref().and_then(Access::parse),
+                            doc.body(),
+                            row.full_word_count.and_then(|n| u32::try_from(n).ok()),
+                            &markers,
+                            complete_percent,
+                        )
+                    });
+                    let stored = complete.or(row.complete);
+                    d.evidence_changed = access != row.access || stored != row.complete;
+                    d.evidence = Some((access, stored));
+                    d.tick = complete == Some(true);
+                }
+                _ => {}
+            }
+        }
+        out.rows.push(d);
+    }
+    Ok(out)
+}
+
+/// The writing half of [`finalize_note`]: links and ticks per `decision` (module doc). An open
+/// `blog`/`mail` row gets its evidence written as before, changed or not.
+///
+/// - `dry` computes every count and writes nothing.
+/// - `pre_linked` lists rows an earlier reconcile phase already counted as linked (so a dry run,
+///   whose database still shows a NULL `note_path`, counts the same as a real run).
+pub(crate) fn apply(
+    ctx: &StepCtx<'_>,
+    path: &str,
+    decision: Decision,
+    dry: bool,
+    pre_linked: &BTreeSet<RowKey>,
+) -> Result<Vars, StepError> {
+    let mut v = Vars {
+        rows: u32::try_from(decision.rows.len()).unwrap_or(u32::MAX),
+        ..Vars::default()
+    };
+    for d in decision.rows {
+        let (kind, key, id) = (&d.row.source_kind, &d.row.source_key, &d.row.item_id);
+        if d.link {
+            let counted = pre_linked.contains(&(kind.clone(), key.clone(), id.clone()));
+            if dry {
+                if !counted {
                     v.linked += 1;
                 }
+            } else if ctx.state().set_tracker_note_path(kind, key, id, path)? {
+                v.linked += 1;
             }
-            db.tracker_item_status(kind, key, id)?
-        };
-        if matches!(status, Some(Some(_)) | None) {
+        }
+        if !d.open {
             continue;
         }
         match kind.as_str() {
-            "youtube" => {
-                if video.as_deref() == Some(id.as_str()) && evidence.is_some() {
-                    if !dry {
-                        // Evidence and tick in one transaction.
-                        let ev = TrackerEvidence {
-                            access: row.access.as_deref(),
-                            complete: Some(true),
-                            full_word_count: row.full_word_count,
-                        };
-                        ctx.state()
-                            .finalize_tracker_item(kind, key, id, Some(ev), true)?;
-                    }
-                    v.ticked += 1;
-                } else {
-                    v.no_evidence += 1;
-                }
-            }
-            "blog" | "mail" => {
-                let access = note_access.clone().or_else(|| row.access.clone());
-                let complete = note_complete.or_else(|| {
-                    let markers: Vec<String> = ctx
-                        .config
-                        .sources()
-                        .by_feed(key)
-                        .map(|b| b.paywall_markers.clone())
-                        .unwrap_or_default();
-                    body_verdict(
-                        access.as_deref().and_then(Access::parse),
-                        doc.body(),
-                        row.full_word_count.and_then(|n| u32::try_from(n).ok()),
-                        &markers,
-                        complete_percent,
-                    )
-                });
-                if !dry {
-                    let access = access.or_else(|| row.access.clone());
+            "youtube" | "blog" | "mail" => {
+                if !dry && let Some((access, complete)) = &d.evidence {
+                    // Evidence and tick in one transaction.
                     let ev = TrackerEvidence {
                         access: access.as_deref(),
-                        complete: complete.or(row.complete),
-                        full_word_count: row.full_word_count,
+                        complete: *complete,
+                        full_word_count: d.row.full_word_count,
                     };
-                    ctx.state().finalize_tracker_item(
-                        kind,
-                        key,
-                        id,
-                        Some(ev),
-                        complete == Some(true),
-                    )?;
+                    ctx.state()
+                        .finalize_tracker_item(kind, key, id, Some(ev), d.tick)?;
                 }
-                if complete == Some(true) {
+                if d.tick {
                     v.ticked += 1;
                 } else {
                     v.no_evidence += 1;
@@ -287,4 +343,18 @@ pub(crate) fn finalize_note(
         }
     }
     Ok(v)
+}
+
+/// The finalize core, shared with `intake_reconcile` (plan intake-followups-mail-youtube WP-5):
+/// [`decide`] then [`apply`] (see each).
+pub(crate) fn finalize_note(
+    ctx: &StepCtx<'_>,
+    path: &str,
+    text: &str,
+    only_kind: Option<&str>,
+    dry: bool,
+    pre_linked: &BTreeSet<RowKey>,
+) -> Result<Vars, StepError> {
+    let decision = decide(ctx.config, &*ctx.state(), path, text, only_kind)?;
+    apply(ctx, path, decision, dry, pre_linked)
 }

@@ -136,6 +136,37 @@ pub(crate) fn list(conn: &rusqlite::Connection, q: &IntakeQuery) -> Result<Vec<T
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Rows matching `cond` (bound to `p`), oldest first.
+pub(crate) fn rows_where(
+    conn: &rusqlite::Connection,
+    cond: &str,
+    p: impl rusqlite::Params,
+) -> Result<Vec<TrackerItem>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM tracker_items WHERE {cond}
+         ORDER BY first_seen_ms, source_kind, source_key, item_id"
+    ))?;
+    let rows = stmt.query_map(p, row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn status_of(
+    conn: &rusqlite::Connection,
+    source_kind: &str,
+    source_key: &str,
+    item_id: &str,
+) -> Result<Option<Option<char>>> {
+    Ok(conn
+        .query_row(
+            "SELECT status FROM tracker_items
+             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+            params![source_kind, source_key, item_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .map(|s| s.and_then(|s| s.chars().next())))
+}
+
 impl StateDb {
     /// Inserts `item` unless its key exists (first sighting wins). Returns `true` when inserted.
     pub fn insert_tracker_item(&mut self, item: &TrackerItem) -> Result<bool> {
@@ -502,16 +533,7 @@ impl StateDb {
         source_key: &str,
         item_id: &str,
     ) -> Result<Option<Option<char>>> {
-        Ok(self
-            .conn()
-            .query_row(
-                "SELECT status FROM tracker_items
-                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
-                params![source_kind, source_key, item_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .map(|s| s.and_then(|s| s.chars().next())))
+        status_of(self.conn(), source_kind, source_key, item_id)
     }
 
     /// Whether one item is done (status `x`/`X`; `None` when no such row).
@@ -548,12 +570,7 @@ impl StateDb {
 
     /// Rows whose `note_path` is `path` (plan auto-intake-sprint WP-3), oldest first.
     pub fn tracker_items_for_note(&self, path: &str) -> Result<Vec<TrackerItem>> {
-        let mut stmt = self.conn().prepare(&format!(
-            "SELECT {COLS} FROM tracker_items WHERE note_path = ?1
-             ORDER BY first_seen_ms, source_kind, source_key, item_id"
-        ))?;
-        let rows = stmt.query_map(params![path], row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        rows_where(self.conn(), "note_path = ?1", params![path])
     }
 
     /// Every row that has a `note_path`, oldest first (plan intake-round-2-clean-dedupe-reading
@@ -739,12 +756,7 @@ impl StateDb {
 
     /// Rows whose `url` is exactly `url` (plan auto-intake-sprint WP-3), oldest first.
     pub fn tracker_items_for_url(&self, url: &str) -> Result<Vec<TrackerItem>> {
-        let mut stmt = self.conn().prepare(&format!(
-            "SELECT {COLS} FROM tracker_items WHERE url = ?1
-             ORDER BY first_seen_ms, source_kind, source_key, item_id"
-        ))?;
-        let rows = stmt.query_map(params![url], row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        rows_where(self.conn(), "url = ?1", params![url])
     }
 
     /// Rows whose `url` contains `needle` (a match-key probe, plan intake-foundations WP-2:
@@ -753,12 +765,7 @@ impl StateDb {
         if needle.is_empty() {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn().prepare(&format!(
-            "SELECT {COLS} FROM tracker_items WHERE instr(url, ?1) > 0
-             ORDER BY first_seen_ms, source_kind, source_key, item_id"
-        ))?;
-        let rows = stmt.query_map(params![needle], row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        rows_where(self.conn(), "instr(url, ?1) > 0", params![needle])
     }
 
     /// Rows of `source_kind` whose `item_id` is `item_id`, any source key (plan
@@ -769,12 +776,11 @@ impl StateDb {
         source_kind: &str,
         item_id: &str,
     ) -> Result<Vec<TrackerItem>> {
-        let mut stmt = self.conn().prepare(&format!(
-            "SELECT {COLS} FROM tracker_items WHERE source_kind = ?1 AND item_id = ?2
-             ORDER BY first_seen_ms, source_kind, source_key, item_id"
-        ))?;
-        let rows = stmt.query_map(params![source_kind, item_id], row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        rows_where(
+            self.conn(),
+            "source_kind = ?1 AND item_id = ?2",
+            params![source_kind, item_id],
+        )
     }
 
     /// One source's rows, newest first, at most `limit`.

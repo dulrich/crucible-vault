@@ -292,6 +292,59 @@ fn already_filed(ctx: &StepCtx<'_>, path: &str, kind: &str) -> Result<bool, Step
         .all(|w| have.iter().any(|h| h == w.trim().trim_start_matches('#'))))
 }
 
+/// The clipper inbox: a clip still here has filing left to do whatever its kind.
+pub(crate) const CLIP_INBOX: &str = "Clippings";
+
+/// `auto_file`'s eligibility, read without writing (plan intake-stage-jobs WP-2, the AutoFile
+/// fact): whether the note at `path` (text `text`) still has filing left to do. True for a note in
+/// the clipper inbox, or for one whose kind rules (step 2) give a kind it can be filed under
+/// (defined, a `file-as-kind` choice) while it is not yet filed under it: it lacks one of the
+/// kind's tags, or sits outside a static kind folder. A placeholder folder (`{period.day}`) is
+/// dated by the run, so a note filed on an earlier day is judged by its tags alone. Dedup is not
+/// part of it (it only ever removes or links a clip). Machine folders and non-notes are never
+/// eligible, as in the step.
+pub(crate) fn filing_pending(config: &ConfigSet, path: &str, text: &str) -> bool {
+    if !path.ends_with(".md") || path.starts_with('_') {
+        return false;
+    }
+    if path
+        .split_once('/')
+        .is_some_and(|(top, _)| top == CLIP_INBOX)
+    {
+        return true;
+    }
+    let doc = FrontmatterDoc::new(text);
+    let Ok((Some(kind), _)) = kind_rules_of(config, &clip_of(&doc), doc.body()) else {
+        return false;
+    };
+    let Ok(def) = kind_def(config, &kind) else {
+        return false;
+    };
+    let allowed = config
+        .action(FILE_ACTION)
+        .and_then(|a| a.params.iter().find(|p| p.name == "kind"))
+        .is_some_and(|p| p.choices.iter().any(|c| c == &kind));
+    if !allowed {
+        return false;
+    }
+    let in_folder = match get_str(def, "folder") {
+        Ok(Some(f)) if !f.contains('{') => {
+            cv_text::vpath::parent(path) == f.trim().trim_matches('/')
+        }
+        _ => true,
+    };
+    let want = get_str_list(def, "tags").unwrap_or_default();
+    let have: Vec<String> = doc
+        .get_texts("tags")
+        .iter()
+        .map(|t| t.trim().trim_start_matches('#').to_owned())
+        .collect();
+    let tagged = want
+        .iter()
+        .all(|w| have.iter().any(|h| h == w.trim().trim_start_matches('#')));
+    !(in_folder && tagged)
+}
+
 /// Executes the step.
 fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
@@ -503,15 +556,24 @@ fn kind_rules(
     clip: &Clip,
     body: &str,
 ) -> Result<(Option<String>, Option<String>), StepError> {
-    let sources: &SourcesConfig = ctx.config.sources();
-    if let Some((kind, p)) = record_kind(sources, clip, |k| kind_def(ctx.config, k).is_ok()) {
+    kind_rules_of(ctx.config, clip, body)
+}
+
+/// [`kind_rules`] over the config alone (it reads nothing else).
+fn kind_rules_of(
+    config: &ConfigSet,
+    clip: &Clip,
+    body: &str,
+) -> Result<(Option<String>, Option<String>), StepError> {
+    let sources: &SourcesConfig = config.sources();
+    if let Some((kind, p)) = record_kind(sources, clip, |k| kind_def(config, k).is_ok()) {
         let publication = Some(p.publication().trim().to_owned()).filter(|p| !p.is_empty());
         return Ok((Some(kind), publication));
     }
     let kind = if cv_text::url_canon::is_youtube_video(&clip.source) {
-        Some(youtube_kind(&ctx.config.pipelines().youtube, body))
+        Some(youtube_kind(&config.pipelines().youtube, body))
     } else if let Some(h) = &clip.host {
-        hosts_kind(ctx.config, h)?
+        hosts_kind(config, h)?
     } else {
         None
     };

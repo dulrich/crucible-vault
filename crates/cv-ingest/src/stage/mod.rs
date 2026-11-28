@@ -1,30 +1,40 @@
-//! The intake stage model (plan `intake-foundations` WP-1): which stages an intake note needs,
-//! what each requires, and the evidence that it is done. This module is the only place stage
-//! order, prerequisites and evidence rules are written. Pure: the caller gathers [`NoteFacts`]
-//! (from the note, `index.db`, `state.db` and `search.db`) and the recorded [`Outcome`]s; nothing
+//! The intake stage model (plan `intake-foundations` WP-1, amended by plan `intake-stage-jobs`
+//! WP-2, D40): which stages an intake note needs, what each requires, the evidence that it is
+//! done, and which stage job may run now. This module is the only place stage order,
+//! prerequisites, evidence and outcome precedence are written; it is the authority the stage jobs
+//! follow. Pure: the caller gathers [`NoteFacts`] (from the note, `index.db`, `state.db`,
+//! `search.db` and the config), the recorded [`Outcome`]s and the queue's [`Progress`]; nothing
 //! here does I/O.
 //!
 //! **Evidence, not job results.** A stage is [`State::Done`] only from stage-specific evidence in
 //! the note's current facts, never from a job having returned Ok:
 //!
-//! | stage | done when | fact-derived skip | unfinished when |
-//! |---|---|---|---|
-//! | `auto_file` | the clip no longer sits in the clipper inbox | — | — |
-//! | `localize` | no remote image embed is left | — | — |
-//! | `image_describe` | every eligible (`_MD5`) image has a description record (a recorded permanent failure counts as attempted) | `no images` | some images attempted, others not |
-//! | `yt_metadata` | the note links its `yt-metadata` note | — | — |
-//! | `yt_clip_tidy` | no clipped thumbnail/description preamble is left | — | — |
-//! | `transcript_refine` | the note carries the `refined` tag | `not youtube`, `no transcript`, `short transcript` | — |
-//! | `enrich` | a non-empty `enriched` stamp | — | `enrich-miss` > 0 |
-//! | `finalize` | a tracker row is linked to the note | `no tracker row` | — |
-//! | `index` | the caller's fact "prepared hash equals indexed hash" is true | — | — |
+//! | stage | action | done when | fact-derived skip | unfinished when |
+//! |---|---|---|---|---|
+//! | `auto_file` | `stage-file` | `auto_file`'s own eligibility leaves nothing to file | — | — |
+//! | `localize` | `stage-localize` | no remote image ref is left | — | — |
+//! | `image_describe` | `stage-describe` | every eligible (`_MD5`) image has a description record (a recorded permanent failure counts as attempted) | `no images` | some images attempted, others not |
+//! | `yt_metadata` | `stage-yt-metadata` | the note links its `yt-metadata` note and the channel step has run where it is enabled and applies | — | — |
+//! | `yt_clip_tidy` | `stage-yt-tidy` | no clipped thumbnail/description preamble is left | — | — |
+//! | `transcript_refine` | `stage-refine` | the note carries the `refined` tag | `not youtube`, `no transcript`, `short transcript` | — |
+//! | `enrich` | `stage-enrich` | a non-empty `enriched` stamp | — | `enrich-miss` > 0 |
+//! | `finalize` | `stage-finalize` | the finalize step's decision is empty | `no tracker row` | — |
+//! | `index` | `stage-index` | the caller's fact "prepared hash equals indexed hash" is true | — | — |
 //!
-//! Otherwise, in this order: a recorded skip whose facts fingerprint ([`fingerprint`]) equals
-//! the note's current one → [`State::Skipped`] (a stale fingerprint is ignored, so the stage
-//! reads pending again); a recorded failure → [`State::Failed`]; a prerequisite (in the kind's
-//! set) that is failed or stuck → [`State::Stuck`]; else [`State::Pending`].
+//! **Precedence** (D40), per stage: a recorded failure of `auto_file` outranks its evidence (the
+//! filing move happens before the filing job's later steps); otherwise done evidence →
+//! [`State::Done`]; a fact-derived skip → [`State::Skipped`]; a recorded row whose fingerprint
+//! ([`fingerprint`]) equals the note's current one: skipped → [`State::Skipped`], failed or
+//! unfinished → [`State::Failed`] / [`State::Unfinished`], or [`State::Exhausted`] once its
+//! attempts reach the cap (a row with a stale fingerprint is ignored, so the stage reads pending
+//! again); unfinished evidence → [`State::Unfinished`]; a **hard** prerequisite (in the kind's
+//! set) that is failed, exhausted or stuck → [`State::Stuck`]; else [`State::Pending`].
 //!
-//! Nothing writes outcomes yet (plan `intake-stage-jobs` adds the writers).
+//! **Admission** ([`admissible`]): a stage may run when it is pending, unfinished or failed below
+//! the cap and every hard prerequisite is done or skipped. Index's prerequisites are **soft**:
+//! Index is admitted last, only once no other required stage of the note can make progress now
+//! (admissible, or with a job queued or running that no open breaker holds — the queue facts are
+//! the caller's [`Progress`]).
 
 use std::fmt::Write as _;
 
@@ -102,7 +112,7 @@ pub enum Stage {
     Localize,
     /// `image_describe`: describe localized images.
     ImageDescribe,
-    /// `yt_metadata`: the linked `_yt_metadata` note.
+    /// `yt_metadata`: the linked `_yt_metadata` note (and the channel step).
     YtMetadata,
     /// `yt_clip_tidy`: strip the clipped thumbnail and description.
     YtClipTidy,
@@ -152,19 +162,51 @@ impl Stage {
         Self::ALL.into_iter().find(|st| st.as_str() == s)
     }
 
-    /// The stages that must settle before this one runs (only those in the note kind's
-    /// required set apply).
+    /// The id of the action that runs this stage as one job (plan `intake-stage-jobs`, the
+    /// stage-to-job table).
+    #[must_use]
+    pub fn action_id(self) -> &'static str {
+        match self {
+            Self::AutoFile => "stage-file",
+            Self::Localize => "stage-localize",
+            Self::ImageDescribe => "stage-describe",
+            Self::YtMetadata => "stage-yt-metadata",
+            Self::YtClipTidy => "stage-yt-tidy",
+            Self::TranscriptRefine => "stage-refine",
+            Self::Enrich => "stage-enrich",
+            Self::Finalize => "stage-finalize",
+            Self::Index => "stage-index",
+        }
+    }
+
+    /// The stage whose action is `id` ([`Self::action_id`]).
+    #[must_use]
+    pub fn for_action(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|st| st.action_id() == id)
+    }
+
+    /// The **hard** prerequisites: stages that must be done or skipped before this one runs, and
+    /// whose failure or exhaustion makes this one stuck (only those in the note kind's required
+    /// set apply).
     #[must_use]
     pub fn prerequisites(self) -> &'static [Stage] {
         match self {
-            Self::AutoFile | Self::YtMetadata | Self::Finalize => &[],
+            Self::AutoFile | Self::YtMetadata | Self::Finalize | Self::Index => &[],
             // Enrichment of a clip runs on its final path (auto_file module doc, step 3).
             Self::Localize | Self::YtClipTidy => &[Self::AutoFile],
             Self::ImageDescribe => &[Self::Localize],
             Self::TranscriptRefine => &[Self::YtClipTidy],
             Self::Enrich => &[Self::TranscriptRefine],
-            // The search hash folds image descriptions and the enriched body.
+        }
+    }
+
+    /// The **soft** prerequisites: they only order (see [`admissible`]); a failed one never makes
+    /// this stage stuck. The search hash folds image descriptions and the enriched body.
+    #[must_use]
+    pub fn soft_prerequisites(self) -> &'static [Stage] {
+        match self {
             Self::Index => &[Self::ImageDescribe, Self::Enrich],
+            _ => &[],
         }
     }
 }
@@ -180,16 +222,17 @@ pub enum ImageRecord {
     Missing,
 }
 
-/// The note's tracker linkage (what `intake_finalize` leaves in `state.db`).
+/// The finalize fact: what the finalize step's read-only decision says for the note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrackerLink {
     /// No tracker row resolves to the note.
     #[default]
     NoRow,
-    /// A row resolves by URL or video id but is not linked to the note.
-    Unlinked,
-    /// A row is linked to the note.
-    Linked,
+    /// Rows resolve and the decision is not empty (a link to add, evidence that differs from
+    /// what a row holds, or a tick).
+    Pending,
+    /// Rows resolve and the decision is empty: nothing left to do.
+    Settled,
 }
 
 /// The plain facts the model judges a note by. The caller gathers them; see the module table
@@ -198,14 +241,16 @@ pub enum TrackerLink {
 pub struct NoteFacts {
     /// The intake kind.
     pub kind: IntakeKind,
-    /// The note sits in the clipper inbox, not yet filed.
+    /// `auto_file`'s eligibility, read without writing: the note still has filing left to do.
     pub awaiting_filing: bool,
-    /// Remote image embeds left in the body.
-    pub remote_images: usize,
+    /// The remote image refs left in the body (their set is the localize fingerprint).
+    pub remote_refs: Vec<String>,
     /// Each eligible (`_MD5`, local) image: its md5 and record.
     pub images: Vec<(String, ImageRecord)>,
     /// The note links its `yt-metadata` note.
     pub yt_metadata_linked: bool,
+    /// The channel step is enabled, applies to the note's channel, and has not run.
+    pub yt_channel_pending: bool,
     /// The clipped thumbnail/description preamble is still present.
     pub youtube_preamble: bool,
     /// The note carries a non-blank `transcript-of` (a link-only post's transcript clip).
@@ -218,8 +263,10 @@ pub struct NoteFacts {
     pub enriched: bool,
     /// The `enrich-miss` count (absent = 0).
     pub enrich_miss: u32,
-    /// Tracker linkage.
+    /// The finalize decision.
     pub tracker: TrackerLink,
+    /// The note's prepared search content hash (empty when not prepared).
+    pub prepared_hash: String,
     /// The note's prepared search hash equals the indexed source hash.
     pub index_current: bool,
 }
@@ -231,9 +278,10 @@ impl NoteFacts {
         Self {
             kind,
             awaiting_filing: false,
-            remote_images: 0,
+            remote_refs: Vec::new(),
             images: Vec::new(),
             yt_metadata_linked: false,
+            yt_channel_pending: false,
             youtube_preamble: false,
             transcript_of: false,
             transcript_words: None,
@@ -241,6 +289,7 @@ impl NoteFacts {
             enriched: false,
             enrich_miss: 0,
             tracker: TrackerLink::NoRow,
+            prepared_hash: String::new(),
             index_current: false,
         }
     }
@@ -253,6 +302,8 @@ pub enum OutcomeKind {
     Skipped,
     /// The stage failed (`attempts` times).
     Failed,
+    /// A run returned Ok but left work behind (`attempts` such runs).
+    Unfinished,
 }
 
 impl OutcomeKind {
@@ -262,6 +313,7 @@ impl OutcomeKind {
         match self {
             Self::Skipped => "skipped",
             Self::Failed => "failed",
+            Self::Unfinished => "unfinished",
         }
     }
 
@@ -271,6 +323,7 @@ impl OutcomeKind {
         match s {
             "skipped" => Some(Self::Skipped),
             "failed" => Some(Self::Failed),
+            "unfinished" => Some(Self::Unfinished),
             _ => None,
         }
     }
@@ -281,7 +334,7 @@ impl OutcomeKind {
 pub struct Outcome {
     /// The stage.
     pub stage: Stage,
-    /// Skip or failure.
+    /// Skip, failure or unfinished run.
     pub kind: OutcomeKind,
     /// Why (a skip's reason is what the report shows).
     pub reason: String,
@@ -300,16 +353,19 @@ pub enum State {
     Pending,
     /// Not applicable to the current facts.
     Skipped(String),
-    /// A run left work behind.
+    /// A run left work behind (below the attempt cap).
     Unfinished,
-    /// Recorded failures.
+    /// Recorded failures (below the attempt cap).
     Failed(u32),
-    /// Blocked behind a failed or stuck prerequisite.
+    /// A failed or unfinished stage whose attempts reached the cap: only a reset retries it.
+    Exhausted(u32),
+    /// Blocked behind a failed, exhausted or stuck hard prerequisite.
     Stuck,
 }
 
 impl State {
-    /// The state's name (`done` | `pending` | `skipped` | `unfinished` | `failed` | `stuck`).
+    /// The state's name (`done` | `pending` | `skipped` | `unfinished` | `failed` | `exhausted`
+    /// | `stuck`).
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -318,6 +374,7 @@ impl State {
             Self::Skipped(_) => "skipped",
             Self::Unfinished => "unfinished",
             Self::Failed(_) => "failed",
+            Self::Exhausted(_) => "exhausted",
             Self::Stuck => "stuck",
         }
     }
@@ -326,6 +383,12 @@ impl State {
     #[must_use]
     pub fn is_settled(&self) -> bool {
         matches!(self, Self::Done | Self::Skipped(_))
+    }
+
+    /// Work a stage job may still do (pending, unfinished or failed below the cap).
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Pending | Self::Unfinished | Self::Failed(_))
     }
 }
 
@@ -339,22 +402,34 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
+fn sorted_set(items: impl Iterator<Item = String>) -> String {
+    let mut v: Vec<String> = items.collect();
+    v.sort_unstable();
+    v.dedup();
+    v.join(",")
+}
+
 /// The fingerprint of the facts `stage` is judged on: `v1:` + 16 hex digits of the FNV-1a 64
-/// hash of a canonical text of those facts (images as their sorted md5 set). Stable across runs
-/// and builds; opaque to callers (store it, compare it for equality).
+/// hash of a canonical text of those facts (images and remote refs as their sorted sets, Index
+/// as the prepared content hash). `auto_file`'s is the kind alone: its failure must survive the
+/// filing move that changes the note's place. Stable across runs and builds; opaque to callers
+/// (store it, compare it for equality).
 #[must_use]
 pub fn fingerprint(stage: Stage, f: &NoteFacts) -> String {
     let mut c = format!("{}|{}|", stage.as_str(), f.kind.as_str());
     let _ = match stage {
-        Stage::AutoFile => write!(c, "inbox={}", f.awaiting_filing),
-        Stage::Localize => write!(c, "remote={}", f.remote_images),
-        Stage::ImageDescribe => {
-            let mut md5s: Vec<&str> = f.images.iter().map(|(m, _)| m.as_str()).collect();
-            md5s.sort_unstable();
-            md5s.dedup();
-            write!(c, "images={}", md5s.join(","))
-        }
-        Stage::YtMetadata => write!(c, "linked={}", f.yt_metadata_linked),
+        Stage::AutoFile => Ok(()),
+        Stage::Localize => write!(c, "remote={}", sorted_set(f.remote_refs.iter().cloned())),
+        Stage::ImageDescribe => write!(
+            c,
+            "images={}",
+            sorted_set(f.images.iter().map(|(m, _)| m.clone()))
+        ),
+        Stage::YtMetadata => write!(
+            c,
+            "linked={}|channel={}",
+            f.yt_metadata_linked, f.yt_channel_pending
+        ),
         Stage::YtClipTidy => write!(c, "preamble={}", f.youtube_preamble),
         Stage::TranscriptRefine | Stage::Enrich => write!(
             c,
@@ -364,7 +439,7 @@ pub fn fingerprint(stage: Stage, f: &NoteFacts) -> String {
                 .map_or_else(|| "none".to_owned(), |w| w.to_string())
         ),
         Stage::Finalize => write!(c, "tracker={:?}", f.tracker),
-        Stage::Index => Ok(()),
+        Stage::Index => write!(c, "hash={}", f.prepared_hash),
     };
     format!("v1:{:016x}", fnv1a(&c))
 }
@@ -381,7 +456,7 @@ fn evidence(stage: Stage, f: &NoteFacts) -> Evidence {
     let done = |b: bool| if b { Evidence::Done } else { Evidence::None };
     match stage {
         Stage::AutoFile => done(!f.awaiting_filing),
-        Stage::Localize => done(f.remote_images == 0),
+        Stage::Localize => done(f.remote_refs.is_empty()),
         Stage::ImageDescribe => {
             if f.images.is_empty() {
                 return Evidence::Skip("no images");
@@ -399,7 +474,7 @@ fn evidence(stage: Stage, f: &NoteFacts) -> Evidence {
                 Evidence::None
             }
         }
-        Stage::YtMetadata => done(f.yt_metadata_linked),
+        Stage::YtMetadata => done(f.yt_metadata_linked && !f.yt_channel_pending),
         Stage::YtClipTidy => done(!f.youtube_preamble),
         Stage::TranscriptRefine => {
             if f.refined {
@@ -424,46 +499,106 @@ fn evidence(stage: Stage, f: &NoteFacts) -> Evidence {
             }
         }
         Stage::Finalize => match f.tracker {
-            TrackerLink::Linked => Evidence::Done,
+            TrackerLink::Settled => Evidence::Done,
             TrackerLink::NoRow => Evidence::Skip("no tracker row"),
-            TrackerLink::Unlinked => Evidence::None,
+            TrackerLink::Pending => Evidence::None,
         },
         Stage::Index => done(f.index_current),
     }
 }
 
+/// A failed or unfinished row's state against the cap.
+fn counted(kind: OutcomeKind, attempts: u32, cap: u32) -> State {
+    let n = attempts.max(1);
+    if n >= cap.max(1) {
+        State::Exhausted(n)
+    } else if kind == OutcomeKind::Failed {
+        State::Failed(n)
+    } else {
+        State::Unfinished
+    }
+}
+
 /// The state of every stage `facts.kind` requires, in [`Stage::ALL`] order, given the recorded
-/// `outcomes` (rows for stages the kind does not require, and unknown rows, are ignored; with
-/// several rows for one stage the first wins).
+/// `outcomes` and the attempt `cap` (a failed or unfinished row at `cap` attempts or more is
+/// [`State::Exhausted`]). Rows for stages the kind does not require, and unknown rows, are
+/// ignored; with several rows for one stage the first wins. See the module doc for the
+/// precedence.
 #[must_use]
-pub fn stage_states(facts: &NoteFacts, outcomes: &[Outcome]) -> Vec<(Stage, State)> {
+pub fn stage_states(facts: &NoteFacts, outcomes: &[Outcome], cap: u32) -> Vec<(Stage, State)> {
     let required = facts.kind.required();
     let mut out: Vec<(Stage, State)> = Vec::with_capacity(required.len());
     for &stage in required {
-        let state = match evidence(stage, facts) {
-            Evidence::Done => State::Done,
-            Evidence::Skip(r) => State::Skipped(r.to_owned()),
-            Evidence::Unfinished => State::Unfinished,
-            Evidence::None => {
-                let recorded = outcomes.iter().find(|o| o.stage == stage);
+        let recorded = outcomes.iter().find(|o| o.stage == stage);
+        let current = recorded.filter(|o| o.fingerprint == fingerprint(stage, facts));
+        let ev = evidence(stage, facts);
+        let state = match (ev, recorded) {
+            // A recorded failed filing outranks the "nothing left to file" evidence.
+            (_, Some(o)) if stage == Stage::AutoFile && o.kind == OutcomeKind::Failed => {
+                counted(o.kind, o.attempts, cap)
+            }
+            (Evidence::Done, _) => State::Done,
+            (Evidence::Skip(r), _) => State::Skipped(r.to_owned()),
+            (ev, _) => {
                 let blocked = stage.prerequisites().iter().any(|p| {
-                    out.iter()
-                        .any(|(s, st)| s == p && matches!(st, State::Failed(_) | State::Stuck))
+                    out.iter().any(|(s, st)| {
+                        s == p
+                            && matches!(st, State::Failed(_) | State::Exhausted(_) | State::Stuck)
+                    })
                 });
-                match recorded {
-                    Some(o)
-                        if o.kind == OutcomeKind::Skipped
-                            && o.fingerprint == fingerprint(stage, facts) =>
-                    {
-                        State::Skipped(o.reason.clone())
-                    }
-                    Some(o) if o.kind == OutcomeKind::Failed => State::Failed(o.attempts.max(1)),
-                    _ if blocked => State::Stuck,
-                    _ => State::Pending,
+                match current {
+                    Some(o) if o.kind == OutcomeKind::Skipped => State::Skipped(o.reason.clone()),
+                    Some(o) => counted(o.kind, o.attempts, cap),
+                    None if matches!(ev, Evidence::Unfinished) => State::Unfinished,
+                    None if blocked => State::Stuck,
+                    None => State::Pending,
                 }
             }
         };
         out.push((stage, state));
     }
     out
+}
+
+/// The queue's view of a note's stage jobs, handed in by the caller (the model stays pure).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Stages whose job is queued or running and no open breaker holds it.
+    pub active: Vec<Stage>,
+    /// Stages whose job (or whose service) waits behind an open breaker.
+    pub held: Vec<Stage>,
+}
+
+/// Whether `stage`'s own state and hard prerequisites admit it (the non-Index rule).
+fn hard_admissible(states: &[(Stage, State)], stage: Stage) -> bool {
+    let Some((_, st)) = states.iter().find(|(s, _)| *s == stage) else {
+        return false;
+    };
+    st.is_open()
+        && stage.prerequisites().iter().all(|p| {
+            states
+                .iter()
+                .find(|(s, _)| s == p)
+                .is_none_or(|(_, st)| st.is_settled())
+        })
+}
+
+/// Whether the job of `stage` may run now for a note in `states` ([`stage_states`]): the stage
+/// is pending, unfinished or failed below the cap and every hard prerequisite is done or
+/// skipped; Index additionally waits while any other required stage can still make progress now
+/// (admissible or `progress.active`, and not `progress.held`). A stage outside `states` (not
+/// required by the kind) is never admissible.
+#[must_use]
+pub fn admissible(states: &[(Stage, State)], stage: Stage, progress: &Progress) -> bool {
+    if !hard_admissible(states, stage) {
+        return false;
+    }
+    if stage != Stage::Index {
+        return true;
+    }
+    !states.iter().any(|(s, _)| {
+        *s != Stage::Index
+            && !progress.held.contains(s)
+            && (progress.active.contains(s) || hard_admissible(states, *s))
+    })
 }

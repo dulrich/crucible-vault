@@ -1023,3 +1023,34 @@ fn resolver_beats_the_tracker_row_when_filling_a_blank_publication() {
 fn config_sources(s: &str) -> cv_actions::pipelines::SourcesConfig {
     cv_actions::pipelines::SourcesConfig::from_table(&s.parse().unwrap()).unwrap()
 }
+
+/// Plan intake-stage-jobs WP-2: `auto_file`'s eligibility, read without writing. A
+/// `clippings`-tagged clip in a day folder whose kind resolves has filing left (AutoFile pending,
+/// where "not in the inbox" read done); once it carries the kind's tags it has none, on an
+/// earlier day too; an inbox clip always has.
+#[test]
+fn filing_eligibility_covers_day_folder_clips() {
+    use super::auto_file::filing_pending;
+    let p = day_clip_path("Ch7.md");
+    let clip = doc(
+        "source: https://saga.example/ch7\ntags:\n  - clippings\n",
+        &words("f", 0, 30),
+    );
+    let e = world(&[(p.as_str(), clip.clone())]);
+    assert!(filing_pending(&e.config, &p, &clip));
+    let filed = clip.replace("  - clippings\n", "  - clippings\n  - fanfic\n");
+    assert!(!filing_pending(&e.config, &p, &filed));
+    assert!(!filing_pending(
+        &e.config,
+        "daily/day/2020-01-01/Ch7.md",
+        &filed
+    ));
+    assert!(filing_pending(&e.config, "Clippings/Ch7.md", &filed));
+    let unmatched = doc("source: https://nowhere.example/x\n", "x");
+    assert!(!filing_pending(&e.config, &p, &unmatched));
+    assert_eq!(
+        e.read(&p).as_deref(),
+        Some(clip.as_str()),
+        "nothing written"
+    );
+}

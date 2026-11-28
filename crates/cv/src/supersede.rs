@@ -594,7 +594,7 @@ fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Res
             .iter()
             .flat_map(|u| value_keys(u, &pubs, None))
             .collect();
-        rows = tracker_rows_by_keys(&db, urls, &keys, &pubs)?;
+        rows = tracker_rows_by_keys(&*db, urls, &keys, &pubs)?;
     }
     finalize_rows(&mut db, rows, r)
 }
@@ -604,8 +604,8 @@ fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Res
 /// are the rows whose stored `url` is a value or its canonical form, plus those containing a
 /// value's [`url_probe`]; each is kept only when its keys intersect. Deduplicated, oldest first
 /// per lookup.
-pub(crate) fn tracker_rows_by_keys(
-    db: &cv_state::StateDb,
+pub(crate) fn tracker_rows_by_keys<D: cv_state::IntakeRead + ?Sized>(
+    db: &D,
     values: &[String],
     keys: &MatchKeys,
     pubs: &PublicationHosts,

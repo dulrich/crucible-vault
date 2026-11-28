@@ -411,6 +411,53 @@ fn channel_enrich(
     Ok(out)
 }
 
+/// The YtMetadata stage's channel fact (plan intake-stage-jobs WP-2), read without writing:
+/// `pipelines.toml` `[youtube] channel_enrich` is on, the note's `yt-metadata` link (`link`)
+/// resolves to a metadata note under `vault_root` naming a channel, and no channel about note for
+/// that channel exists under the metadata root yet. An unreadable metadata note, or a tombstone
+/// (no channel), is not pending.
+pub(crate) fn channel_step_pending(
+    config: &ConfigSet,
+    vault_root: &std::path::Path,
+    link: &str,
+) -> bool {
+    let yt = &config.pipelines().youtube;
+    if !yt.channel_enrich {
+        return false;
+    }
+    let target = link
+        .trim()
+        .trim_start_matches("[[")
+        .trim_end_matches("]]")
+        .split(['|', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if target.is_empty() {
+        return false;
+    }
+    let rel = if target.ends_with(".md") {
+        target.to_owned()
+    } else {
+        format!("{target}.md")
+    };
+    let Ok(text) = std::fs::read_to_string(vault_root.join(&rel)) else {
+        return false;
+    };
+    let Some(channel) = str_prop(FrontmatterDoc::new(text).get("channelId").ok().flatten())
+        .filter(|c| !c.trim().is_empty())
+    else {
+        return false;
+    };
+    let root = yt.metadata_root();
+    !super::util::child_dirs(vault_root, root).iter().any(|d| {
+        std::fs::read_to_string(vault_root.join(format!("{root}/{d}/about.md"))).is_ok_and(|t| {
+            str_prop(FrontmatterDoc::new(t).get("channelId").ok().flatten()).as_deref()
+                == Some(channel.as_str())
+        })
+    })
+}
+
 /// `findExistingChannelAboutNote` + `channelAboutAgeMs`: `(path, age in whole days)`.
 fn find_about(
     ctx: &StepCtx<'_>,

@@ -1,10 +1,13 @@
 //! Stage outcomes and learned publication hosts (plan `intake-foundations` WP-1, schema v22).
 //!
 //! `stage_outcomes`: one row per (note id, stage) for what the note itself does not show — a
-//! skip (with the fingerprint of the facts it was judged on) or a failure (with its attempt
-//! count). The stage and outcome names are `cv_ingest::stage`'s strings, stored as written; this
+//! skip (with the fingerprint of the facts it was judged on), a failure (with its attempt count),
+//! or an unfinished run (an Ok that left work, with its attempt count; plan `intake-stage-jobs`
+//! WP-2, D40). The stage and outcome names are `cv_ingest::stage`'s strings, stored as written; this
 //! crate does not depend on `cv-ingest`. Rows go when the note id is retired
-//! (`note_ids::retire_row`, same transaction). Nothing writes them yet (plan `intake-stage-jobs`).
+//! (`note_ids::retire_row`, same transaction); a reset is [`StateDb::clear_stage_outcomes`]. The
+//! `outcome` column is text, so `unfinished` needed no schema change. Nothing writes them yet (plan
+//! `intake-stage-jobs` WP-3).
 //!
 //! `learned_hosts`: a publication host proved by a tracker observation, owned by the first
 //! publication that proved it (the host is the key). Minimal accessors; plan `intake-foundations`
@@ -25,7 +28,7 @@ pub struct StageOutcomeRow {
     pub note_id: i64,
     /// `cv_ingest::stage::Stage::as_str`.
     pub stage: String,
-    /// `cv_ingest::stage::OutcomeKind::as_str` (`skipped` | `failed`).
+    /// `cv_ingest::stage::OutcomeKind::as_str` (`skipped` | `failed` | `unfinished`).
     pub outcome: String,
     /// Why (blank when none).
     pub reason: String,
@@ -277,6 +280,29 @@ mod tests {
         s.note_id_bind("d.md").unwrap();
         s.note_id_move("d.md", "c.md", 13).unwrap();
         assert!(s.stage_outcomes(c).unwrap().is_empty());
+    }
+
+    /// `unfinished` (plan intake-stage-jobs WP-2) is stored and read back as written, with its
+    /// attempts, through both the daemon handle and the read-only reader; a reset clears it.
+    #[test]
+    fn unfinished_rows_carry_attempts_and_reset_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut s = StateDb::open(&path, 1, QueueConfig::default()).unwrap();
+        let a = i64::try_from(s.note_id_bind("a.md").unwrap().0).unwrap();
+        let mut r = row(a, "enrich", "unfinished", 5);
+        r.attempts = 2;
+        s.upsert_stage_outcome(&r).unwrap();
+        s.upsert_stage_outcome(&row(a, "localize", "failed", 6))
+            .unwrap();
+        let got = StateReader::open(&path)
+            .unwrap()
+            .stage_outcomes_for(&[a])
+            .unwrap();
+        let un = got.iter().find(|g| g.stage == "enrich").unwrap();
+        assert_eq!((un.outcome.as_str(), un.attempts), ("unfinished", 2));
+        assert_eq!(s.clear_stage_outcomes(a, None).unwrap(), 2);
+        assert!(s.stage_outcomes(a).unwrap().is_empty());
     }
 
     #[test]
