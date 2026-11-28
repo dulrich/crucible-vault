@@ -30,4 +30,22 @@ pub fn load_config_dir(dir: &Path, set: &mut ConfigSet) {
         }
     }
     set.reload(&files, &crate::steps::validate);
+    disarm_unkeyed_stage_actions(set);
+}
+
+/// Plan intake-stage-jobs WP-1: a stage action whose steps resolve to more than one breaker key
+/// (or to one that is not static) is disarmed with the resolution's message, at load and reload.
+pub(crate) fn disarm_unkeyed_stage_actions(set: &mut ConfigSet) {
+    let bad: Vec<(String, String)> = set
+        .armed_actions()
+        .filter(|a| a.stage.is_some())
+        .filter_map(|a| {
+            crate::steps::action_service_key(a, set)
+                .err()
+                .map(|e| (a.id.clone(), e))
+        })
+        .collect();
+    for (id, e) in bad {
+        set.disarm(&id, e);
+    }
 }

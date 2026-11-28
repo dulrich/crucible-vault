@@ -571,3 +571,33 @@ pub(crate) fn run(
     }
     Ok(out)
 }
+
+/// The breaker key a run of `agent` on its default model defers under ([`provider_failure`] is
+/// called with the resolved provider's id): the provider of its `agents.toml` default model, as
+/// [`resolve_model`] resolves it (plan intake-stage-jobs WP-1, "service at enqueue").
+pub(crate) fn default_service_key(config: &ConfigSet, agent: &str) -> Result<String, String> {
+    let def = agent_def(config, agent)?;
+    let m = def
+        .model
+        .as_deref()
+        .ok_or_else(|| format!("agent {agent:?} has no default model"))?;
+    let provs = providers(config)?;
+    let (p, _) = check_ref(&provs, m)?;
+    Ok(p.id.clone())
+}
+
+/// The breaker key of an `agent` step (`t` its params): a literal model's provider, else the
+/// agent's default model's; a model named by a run param has no static key.
+pub(crate) fn step_service_key(t: &toml::Table, config: &ConfigSet) -> Result<String, String> {
+    let sp = params(t)?;
+    match sp.model.as_deref().map(model_spec).transpose()? {
+        Some(ModelSpec::Literal(m)) => {
+            let provs = providers(config)?;
+            check_ref(&provs, &m).map(|(p, _)| p.id.clone())
+        }
+        Some(ModelSpec::Param(n)) => Err(format!(
+            "agent step: model from param {n:?} has no static breaker key"
+        )),
+        None => default_service_key(config, &sp.agent),
+    }
+}

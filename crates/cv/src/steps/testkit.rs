@@ -37,6 +37,7 @@ impl ActionBuilder {
             durable: true,
             hold: false,
             fast: false,
+            stage: None,
             steps,
             starters: vec![],
             resources,
@@ -204,6 +205,7 @@ impl StepEnv {
             state: &self.state,
             writer: Some(self.fx.writer.clone()),
             children: &NoChildren,
+            admitter: &super::NoAdmitter,
             written: Vec::new(),
             guard: None,
         }

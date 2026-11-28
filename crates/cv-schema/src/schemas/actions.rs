@@ -218,6 +218,22 @@ pub static ACTION: Record = Record {
         )
         .dflt(D::Bool(false)),
         field(
+            "stage",
+            "Intake stage",
+            "The intake stage this action is the job of (admitted through the stage seam; needs resources.note)",
+            Node::Enum(&[
+                "auto_file",
+                "localize",
+                "image_describe",
+                "yt_metadata",
+                "yt_clip_tidy",
+                "transcript_refine",
+                "enrich",
+                "finalize",
+                "index",
+            ]),
+        ),
+        field(
             "steps",
             "Steps",
             "Executed in order",

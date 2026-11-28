@@ -277,3 +277,10 @@ fn save_raw(ctx: &mut StepCtx<'_>, path: &str, original: &[u8]) -> Result<String
         "transcript_refine: no free raw-transcript name",
     ))
 }
+
+/// The breaker key of a `transcript_refine` step: its agent's default-model provider (what
+/// [`agent::complete`] defers under; plan intake-stage-jobs WP-1).
+pub(crate) fn service_key(t: &toml::Table, config: &ConfigSet) -> Result<String, String> {
+    let p = parse(t)?;
+    agent::default_service_key(config, &p.agent)
+}

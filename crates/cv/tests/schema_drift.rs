@@ -250,6 +250,7 @@ lane = "background"
 durable = false
 hold = true
 fast = true
+stage = "enrich"
 resources = { note = true, keys = ["note::{path}", "p::{param.kind}"] }
 
 [[action.params]]
@@ -773,4 +774,34 @@ fn daemon_config_files_are_the_schema_registry_head() {
         cv_schema::FILES[..cv_actions::CONFIG_FILES.len()]
     );
     assert_eq!(cv_actions::CONFIG_FILES.len(), 9);
+}
+
+/// Plan intake-stage-jobs WP-1: an action's `stage` names one stage of the stage model, spelled
+/// as the model spells it, in the parser, the schema and `cv_ingest::stage` alike; an unknown one
+/// is refused by both.
+#[test]
+fn stage_marker_names_agree_and_unknown_is_refused() {
+    let model: Vec<&str> = cv_ingest::stage::Stage::ALL
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    assert_eq!(model, cv_actions::STAGE_NAMES.to_vec());
+    let field = cv_schema::schemas::ACTION
+        .fields
+        .iter()
+        .find(|f| f.key == "stage")
+        .expect("stage field");
+    let cv_schema::Node::Enum(names) = field.node else {
+        panic!("stage is an enum");
+    };
+    assert_eq!(names.to_vec(), model);
+    let bad = "[[action]]\nid = \"s\"\nstage = \"nope\"\n[[action.steps]]\ntype = \"guard\"\n";
+    assert!(!schema_errors("actions.toml", bad).is_empty());
+    let mut files = support();
+    files.insert("actions.toml", bad.to_owned());
+    let errs = reload(&files);
+    assert!(
+        errs.iter().any(|e| e.contains("unknown stage \"nope\"")),
+        "{errs:?}"
+    );
 }

@@ -665,3 +665,14 @@ fn strip_top(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     });
     Ok(out)
 }
+
+/// The breaker key of an `intake_enrich` step: its agent's default-model provider for the note
+/// scope (what [`agent::complete`] defers under); the backfill and strip-top scopes call no
+/// provider themselves (plan intake-stage-jobs WP-1).
+pub(crate) fn service_key(t: &toml::Table, config: &ConfigSet) -> Result<Option<String>, String> {
+    let p = parse(t)?;
+    match p.scope {
+        Scope::Note => agent::default_service_key(config, &p.agent).map(Some),
+        Scope::Backfill | Scope::StripTop => Ok(None),
+    }
+}

@@ -367,6 +367,20 @@ impl StateDb {
         failure: Option<&BreakerFailure>,
         now_ms: i64,
     ) -> Result<Option<i64>> {
+        self.settle_with_breaker_credit(id, result, failure, true, now_ms)
+    }
+
+    /// [`Self::settle_with_breaker`] where a `Done` reports success only when `credit` holds
+    /// (plan intake-stage-jobs WP-1: a stage job made a real provider attempt in this claim).
+    /// An uncredited `Done` returns a held half-open probe without closing the breaker.
+    pub fn settle_with_breaker_credit(
+        &mut self,
+        id: &str,
+        result: &JobResult,
+        failure: Option<&BreakerFailure>,
+        credit: bool,
+        now_ms: i64,
+    ) -> Result<Option<i64>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -381,7 +395,7 @@ impl StateDb {
         if let Some(svc) = service
             && let Some(mut h) = health::load(&tx, &svc)?
         {
-            if matches!(result, JobResult::Done) {
+            if credit && matches!(result, JobResult::Done) {
                 let was_closed = h.state == BreakerState::Closed;
                 h.report_success();
                 health::store(&tx, &h)?;
@@ -395,6 +409,67 @@ impl StateDb {
         }
         tx.commit()?;
         Ok(requeued)
+    }
+
+    /// Every queued job, oldest first (the reload re-tag reads their params).
+    pub fn queued_jobs(&self) -> Result<Vec<Job>> {
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM jobs WHERE status = 'queued' ORDER BY id")?;
+            stmt.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(j) = query::get(&self.conn, &id)? {
+                out.push(j);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Sets a queued job's breaker tag (`None` = untagged); a non-queued row is untouched.
+    pub fn retag_queued(&mut self, id: &str, service: Option<&str>) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE jobs SET service = ?2 WHERE id = ?1 AND status = 'queued'",
+            params![id, service],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// A claimed job whose tag went stale: back to queued under `service`, without running and
+    /// without spending an attempt. The old service's held half-open probe is retired (released,
+    /// never credited); the new service's breaker is not touched.
+    pub fn requeue_retagged(&mut self, id: &str, service: Option<&str>, now_ms: i64) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(job) = query::get(&tx, id)? else {
+            return Err(StateError::NoSuchJob(id.to_owned()));
+        };
+        if job.status != JobStatus::Running || job.claim_token.as_deref() != Some(&self.token) {
+            return Err(StateError::WrongStatus {
+                id: id.to_owned(),
+                status: job.status,
+                expected: "running under this claim token",
+            });
+        }
+        tx.execute(
+            "UPDATE jobs SET status = 'queued', service = ?2, attempts = MAX(attempts - 1, 0), claim_token = NULL, claimed_at_ms = NULL WHERE id = ?1",
+            params![id, service],
+        )?;
+        telemetry::record_settle(&tx, id, now_ms)?;
+        if let Some(old) = &job.service
+            && let Some(mut h) = health::load(&tx, old)?
+            && h.state == BreakerState::HalfOpen
+            && h.probe_in_flight()
+        {
+            h.release_probe();
+            health::store(&tx, &h)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// The settle write inside `tx`; returns the job's `service` (as claimed).

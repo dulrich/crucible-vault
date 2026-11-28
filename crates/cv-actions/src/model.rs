@@ -48,6 +48,10 @@ pub struct Action {
     /// stay short and never call a model: config load rejects `fast = true` with a step for which
     /// [`StepKind::calls_model`] holds.
     pub fast: bool,
+    /// The intake stage this action is the job of (plan intake-stage-jobs WP-1): one of
+    /// [`STAGE_NAMES`]. Only a stage-marked action may be admitted through the runner's stage
+    /// seam; a user-started run of it is an ordinary job.
+    pub stage: Option<String>,
     /// Steps, executed sequentially.
     pub steps: Vec<Step>,
     /// How runs start.
@@ -55,6 +59,21 @@ pub struct Action {
     /// I3 resource-key derivation.
     pub resources: ResourceSpec,
 }
+
+/// The intake stage names an action's `stage` may carry: the stage model's own spelling
+/// (`cv_ingest::stage::Stage::as_str`, kept equal by a test in `cv`), owned here so `cv-actions`
+/// takes no crate edge.
+pub const STAGE_NAMES: [&str; 9] = [
+    "auto_file",
+    "localize",
+    "image_describe",
+    "yt_metadata",
+    "yt_clip_tidy",
+    "transcript_refine",
+    "enrich",
+    "finalize",
+    "index",
+];
 
 impl Action {
     /// Whether any step mutates a note (such a run must derive at least one resource key).
@@ -249,6 +268,7 @@ pub fn media_cleanup_action() -> Action {
         durable: true,
         hold: false,
         fast: false,
+        stage: None,
         steps: vec![Step {
             kind: StepKind::MediaCleanup,
             params: toml::Table::new(),
@@ -625,6 +645,7 @@ mod tests {
             durable: true,
             hold: false,
             fast: false,
+            stage: None,
             steps: steps
                 .iter()
                 .map(|s| Step::from_table(toml::from_str(s).unwrap()).unwrap())

@@ -417,6 +417,22 @@ impl PrepareHost for NotePrep<'_> {
     }
 }
 
+/// The breaker key of a `search_upsert` step (`t` its params): its `embed` provider's id (what
+/// an unavailable embedder defers under, [`map_err`]); `None` without an `embed`.
+pub(crate) fn service_key(
+    kind: StepKind,
+    t: &toml::Table,
+    config: &ConfigSet,
+) -> Result<Option<String>, String> {
+    let p = parse(kind, t)?;
+    match p.embed {
+        None => Ok(None),
+        Some((provider, model)) => {
+            resolve_target(config, &provider, &model).map(|t| Some(t.provider.id))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

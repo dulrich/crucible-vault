@@ -36,6 +36,14 @@ impl ChildSpawner for Spawner<'_> {
     }
 }
 
+impl StageAdmitter for Spawner<'_> {
+    fn admit_stage(&self, action_id: &str, note_path: &str) -> Result<Admission, String> {
+        self.inner
+            .admit_stage(self.config, action_id, note_path)
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl Spawner<'_> {
     fn spawn_with(
         &self,
@@ -121,6 +129,23 @@ pub(super) fn execute_steps(
         };
         done.insert(i, o);
     }
+    // Plan intake-stage-jobs WP-1: a seam job on its first claim (no checkpoint yet) asks the
+    // guard whether its stage is still runnable; a job with checkpoints always resumes, and a
+    // user-started run of a stage action is never a seam job.
+    if done.is_empty()
+        && jp.is_stage()
+        && let Some(stage) = &action.stage
+    {
+        let guard = Arc::clone(&read(&inner.stage_guard));
+        if !guard.runnable(stage, &jp.context, config) {
+            tracing::info!(
+                job = job_id,
+                stage,
+                "stage no longer runnable; settled without running"
+            );
+            return (JobResult::Done, summary);
+        }
+    }
     let mut seen_outputs = BTreeSet::new();
     // The run's own context: `active_path` follows the note by id (`refresh`, review D3).
     let mut context = jp.context.clone();
@@ -188,6 +213,7 @@ pub(super) fn execute_steps(
                 state: &inner.state,
                 writer: inner.writer.writer(),
                 children: &spawner,
+                admitter: &spawner,
                 written: Vec::new(),
                 guard: Some(&guard),
             };
@@ -232,6 +258,7 @@ pub(super) fn execute_steps(
                         summary,
                     );
                 }
+                summary.attempted |= o.attempted;
                 absorb(&o, &mut summary, &mut vars);
                 if o.stop {
                     break;

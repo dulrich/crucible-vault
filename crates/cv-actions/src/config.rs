@@ -66,6 +66,9 @@ struct ActionDef {
     /// Plan job-slots-fast-lane WP-1: the action may use the reserved fast job slot.
     #[serde(default)]
     fast: bool,
+    /// Plan intake-stage-jobs WP-1: the intake stage this action is the job of.
+    #[serde(default)]
+    stage: Option<String>,
     #[serde(default)]
     steps: Vec<toml::Table>,
     #[serde(default)]
@@ -494,6 +497,12 @@ impl ConfigSet {
         }
     }
 
+    /// Disarms `id` with `reason` (a whole-action check only the `cv` binary can make, e.g. a
+    /// stage action whose steps resolve to more than one breaker key). The first reason wins.
+    pub fn disarm(&mut self, id: &str, reason: String) {
+        self.disarmed.entry(id.to_owned()).or_insert(reason);
+    }
+
     /// Why `id` is disarmed, if it is.
     #[must_use]
     pub fn disarm_reason(&self, id: &str) -> Option<&str> {
@@ -542,6 +551,17 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
             steps[n].kind().as_str()
         ));
     }
+    if let Some(st) = &def.stage
+        && !crate::model::STAGE_NAMES.contains(&st.as_str())
+    {
+        return Err(format!(
+            "unknown stage {st:?} (expected one of {})",
+            crate::model::STAGE_NAMES.join(", ")
+        ));
+    }
+    if def.stage.is_some() && !def.resources.note {
+        return Err("stage needs resources.note (a stage job acts on one note)".into());
+    }
     if def.hold && !def.resources.note {
         return Err(
             "hold = true needs resources.note (an action that keys no note has no note to hold)"
@@ -584,6 +604,7 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
         durable: def.durable,
         hold: def.hold,
         fast: def.fast,
+        stage: def.stage,
         steps,
         starters,
         resources: def.resources,

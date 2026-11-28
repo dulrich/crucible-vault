@@ -6,8 +6,13 @@ impl Inner {
     /// Breaker feeding + bounded transient retry (plan WP-2), run after the steps. Pure: returns
     /// the final result plus the service failure to report; both are committed together with the
     /// settle by [`Self::settle`] (SR10).
+    ///
+    /// A seam job (`stage`, plan intake-stage-jobs WP-1) is never failed at the transient-attempt
+    /// limit: it stays deferred and breaker-eligible, so a half-open breaker always has a job to
+    /// probe with. Ordinary jobs keep the limit (and the bulk requeue on breaker close).
     pub(crate) fn apply_service_policy(
         job: &cv_state::Job,
+        stage: bool,
         result: JobResult,
         cause: Option<DeferCause>,
     ) -> (JobResult, Option<BreakerFailure>) {
@@ -26,7 +31,7 @@ impl Inner {
                     reason: format!("transient {kind:?} (attempt {})", job.attempts),
                     retry_after_ms: None,
                 };
-                let result = if job.attempts >= TRANSIENT_MAX_ATTEMPTS {
+                let result = if job.attempts >= TRANSIENT_MAX_ATTEMPTS && !stage {
                     JobResult::Failed {
                         error: format!(
                             "service {svc} still failing after {} attempts",
@@ -72,9 +77,19 @@ impl Inner {
     }
 
     /// Settles `job` with `result` and its breaker update in one state.db transaction.
-    fn settle(&self, job: &cv_state::Job, result: &JobResult, failure: Option<&BreakerFailure>) {
+    /// `credit` = a `Done` may count as a breaker success (always for an ordinary job; for a seam
+    /// job only when a step made a real attempt in this claim).
+    fn settle(
+        &self,
+        job: &cv_state::Job,
+        result: &JobResult,
+        failure: Option<&BreakerFailure>,
+        credit: bool,
+    ) {
         let now = self.clock.now_ms();
-        match lock(&self.state).settle_with_breaker(&job.id, result, failure, now) {
+        let settled =
+            lock(&self.state).settle_with_breaker_credit(&job.id, result, failure, credit, now);
+        match settled {
             Ok(Some(requeued)) => tracing::info!(
                 service = job.service.as_deref().unwrap_or_default(),
                 requeued,
@@ -232,6 +247,23 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     let id = job.id.clone();
     let config = Arc::clone(&read(&inner.config));
     let parsed: Result<JobParams, _> = serde_json::from_value(job.params.clone());
+    let stage = parsed.as_ref().is_ok_and(JobParams::is_stage);
+    // Plan intake-stage-jobs WP-1: a claimed seam job whose tag differs from the current
+    // resolution is re-tagged and requeued without running (its old half-open probe retired), so
+    // claim, execution and breaker settlement use one key.
+    if let Ok(jp) = &parsed
+        && stage
+        && let Ok(tag) = Inner::stage_tag(&config, jp)
+        && tag != job.service
+    {
+        let now = inner.clock.now_ms();
+        if let Err(e) = lock(&inner.state).requeue_retagged(&id, tag.as_deref(), now) {
+            tracing::error!(job_id = %id, error = %e, "re-tag requeue failed");
+        }
+        lock(&inner.running).remove(&id);
+        inner.publish(&id, JobState::Pending, None, Vec::new(), None, None);
+        return;
+    }
     let (result, summary) = match parsed {
         Err(e) => (
             failed(format!("bad job params: {e}")),
@@ -269,8 +301,8 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
             }
         },
     };
-    let (result, failure) = Inner::apply_service_policy(&job, result, summary.defer_cause);
-    inner.settle(&job, &result, failure.as_ref());
+    let (result, failure) = Inner::apply_service_policy(&job, stage, result, summary.defer_cause);
+    inner.settle(&job, &result, failure.as_ref(), !stage || summary.attempted);
     // Dropping the entry releases its permit.
     let hold = lock(&inner.running).remove(&id).and_then(|j| j.hold);
     let (state, message) = match &result {

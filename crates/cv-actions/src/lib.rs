@@ -23,8 +23,8 @@ pub use config::{CONFIG_FILES, ConfigSet, StepValidator, works_rule};
 pub use cv_protocol::{ParamKind, ParamSpec};
 pub use model::{
     ATTACHMENTS_KEY, Action, INTAKE_IDENTITY_KEY, LaneChoice, MEDIA_CLEANUP_ACTION, OriginSel,
-    PropSelector, ResourceSpec, RunAction, Schedule, Selector, Starter, Step, StepKind,
-    media_cleanup_action,
+    PropSelector, ResourceSpec, RunAction, STAGE_NAMES, Schedule, Selector, Starter, Step,
+    StepKind, media_cleanup_action,
 };
 pub use pipelines::{PipelinesConfig, SourcesConfig};
 pub use vault::{

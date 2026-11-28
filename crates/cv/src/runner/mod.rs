@@ -34,8 +34,8 @@ use serde_json::{Map, Value};
 use tokio::sync::{Notify, broadcast, watch};
 
 use crate::steps::{
-    self, ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome, TRANSIENT_BASE_MS,
-    TRANSIENT_CAP_MS, TRANSIENT_MAX_ATTEMPTS,
+    self, Admission, ChildSpawner, DeferCause, StageAdmitter, StepCtx, StepError, StepOutcome,
+    TRANSIENT_BASE_MS, TRANSIENT_CAP_MS, TRANSIENT_MAX_ATTEMPTS,
 };
 use crate::sync::{lock, read, write};
 
@@ -130,6 +130,47 @@ pub enum Trigger {
         /// Parent job id.
         parent: String,
     },
+    /// Admitted through the stage seam ([`Runner::admit_stage`], plan intake-stage-jobs WP-1).
+    /// This trigger is the durable seam marker: the guard, the no-terminal-outage rule and the
+    /// reload re-tag find a seam job by it after a restart.
+    Stage {
+        /// The note's bound id (also its `note-id::` resource key).
+        note: cv_protocol::NoteId,
+    },
+}
+
+impl JobParams {
+    /// Whether the job was enqueued through the stage seam.
+    #[must_use]
+    pub fn is_stage(&self) -> bool {
+        matches!(self.trigger, Trigger::Stage { .. })
+    }
+}
+
+/// The resource key every seam job of one note carries (follows the note across a rename,
+/// unlike a path key).
+#[must_use]
+pub fn note_resource_key(id: cv_protocol::NoteId) -> String {
+    format!("note-id::{}", id.0)
+}
+
+/// Whether a stage is still runnable for a note, asked on a seam job's first claim (no
+/// checkpoint yet). WP-2 supplies the stage model's answer through [`Runner::set_stage_guard`];
+/// until then [`AlwaysRun`].
+pub trait StageGuard: Send + Sync {
+    /// `stage` (an [`cv_actions::STAGE_NAMES`] name) for the job's note; `false` settles the
+    /// job Done with no attempt.
+    fn runnable(&self, stage: &str, context: &ActionContext, config: &ConfigSet) -> bool;
+}
+
+/// The stub guard: every stage is runnable.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AlwaysRun;
+
+impl StageGuard for AlwaysRun {
+    fn runnable(&self, _: &str, _: &ActionContext, _: &ConfigSet) -> bool {
+        true
+    }
 }
 
 /// Job params of `action:<id>` jobs: `{action_id, params, context, trigger, chain}`.
@@ -243,6 +284,8 @@ impl RunRequest {
 pub enum EnqueueError {
     /// Resource keys could not be derived (fail closed, never keyless).
     NoResourceKeys(String),
+    /// A stage admission was refused (not armed, no stage marker, no bound note id, no key).
+    Admission(String),
     /// The store failed.
     State(String),
 }
@@ -251,6 +294,7 @@ impl std::fmt::Display for EnqueueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EnqueueError::NoResourceKeys(m) => write!(f, "no resource keys: {m}"),
+            EnqueueError::Admission(m) => write!(f, "stage admission refused: {m}"),
             EnqueueError::State(m) => write!(f, "state.db: {m}"),
         }
     }
@@ -265,6 +309,9 @@ pub struct RunSummary {
     pub output_paths: Vec<String>,
     /// Why the run deferred (set only when the result is `Deferred`).
     pub defer_cause: Option<DeferCause>,
+    /// A step run in this claim reported a real provider attempt (replayed checkpoints never
+    /// count; plan intake-stage-jobs WP-1).
+    pub attempted: bool,
 }
 
 /// Runner construction parameters.
@@ -312,6 +359,8 @@ pub(crate) struct Inner {
     /// The one shared `semsearch` handle per process (Decision 7).
     search: cv_search::SearchDb,
     config: RwLock<Arc<ConfigSet>>,
+    /// The stage-job guard (WP-2 injects the stage model's; [`AlwaysRun`] until then).
+    stage_guard: RwLock<Arc<dyn StageGuard>>,
     wake: Notify,
     /// Every claimed job in this runner (`job id -> RunningJob`), inserted at claim and removed
     /// at one site, the settle in `claim::run_job`, together with the permit's release, so the
@@ -356,6 +405,7 @@ impl Runner {
                 system_trash: deps.data_home.map(|h| h.join("Trash")),
                 search: cv_search::SearchDb::new(deps.search_db),
                 config: RwLock::new(Arc::new(ConfigSet::new())),
+                stage_guard: RwLock::new(Arc::new(AlwaysRun)),
                 wake: Notify::new(),
                 running: Running::default(),
                 finished: Mutex::new(BTreeMap::new()),
@@ -375,9 +425,22 @@ impl Runner {
         Arc::clone(&read(&self.inner.config))
     }
 
-    /// Replaces the config snapshot (tests; the daemon uses [`Runner::reload_config`]).
+    /// Replaces the config snapshot (tests; the daemon uses [`Runner::reload_config`]). Queued
+    /// stage jobs are re-tagged against it.
     pub fn set_config(&self, c: ConfigSet) {
         *write(&self.inner.config) = Arc::new(c);
+        self.inner.retag_queued_stage_jobs();
+    }
+
+    /// Installs the stage-job guard (the injection point WP-2 wires the stage model into).
+    pub fn set_stage_guard(&self, g: Arc<dyn StageGuard>) {
+        *write(&self.inner.stage_guard) = g;
+    }
+
+    /// Admits the stage action `action_id` for the note at `path` through the stage seam.
+    pub fn admit_stage(&self, action_id: &str, path: &str) -> Result<Admission, EnqueueError> {
+        let config = self.config();
+        self.inner.admit_stage(&config, action_id, path)
     }
 
     /// Re-reads `CV_CONFIG_DIR` (hot reload, pin 2); returns the current errors.
@@ -569,6 +632,96 @@ impl Inner {
         Ok(job)
     }
 
+    /// The stage seam (plan intake-stage-jobs WP-1): one chain-free background job of a
+    /// stage-marked `action_id` on the note at `path`, deduped on `{action}::{note id}`, its
+    /// `service` set at enqueue ([`steps::action_service_key`]) and keyed by the note id.
+    pub(crate) fn admit_stage(
+        &self,
+        config: &ConfigSet,
+        action_id: &str,
+        path: &str,
+    ) -> Result<Admission, EnqueueError> {
+        let refuse = |m: String| Err(EnqueueError::Admission(m));
+        let Some(action) = config.armed(action_id) else {
+            return refuse(format!(
+                "action {action_id:?} is not armed: {}",
+                config.disarm_reason(action_id).unwrap_or("unknown action")
+            ));
+        };
+        if action.stage.is_none() {
+            return refuse(format!("action {action_id:?} has no stage marker"));
+        }
+        let id = match lock(&self.state).note_id_at(path) {
+            Ok(Some(id)) => id,
+            Ok(None) => return refuse("the note has no bound id; bind it and retry".into()),
+            Err(e) => return Err(EnqueueError::State(e.to_string())),
+        };
+        let service = steps::action_service_key(action, config).map_err(EnqueueError::Admission)?;
+        let context = ActionContext {
+            active_path: Some(path.to_owned()),
+            active_id: Some(id),
+            ..ActionContext::default()
+        };
+        let req = RunRequest::background(
+            action,
+            Trigger::Stage { note: id },
+            context,
+            &id.0.to_string(),
+        );
+        let mut job = self.new_job(action, req)?;
+        job.resource_keys.push(note_resource_key(id));
+        job.resource_keys.sort();
+        job.resource_keys.dedup();
+        job.service = service;
+        let out = lock(&self.state)
+            .enqueue(job, self.clock.now_ms())
+            .map_err(|e| EnqueueError::State(e.to_string()))?;
+        let admission = match &out {
+            EnqueueOutcome::Enqueued(id) => Admission::Inserted(id.clone()),
+            EnqueueOutcome::Duplicate(id) => Admission::Duplicate(id.clone()),
+        };
+        self.enqueued(out)?;
+        Ok(admission)
+    }
+
+    /// The tag a seam job of `jp` should carry under `config` (`Err`: the action is gone,
+    /// unmarked or unresolvable; the job is left as it is and fails at claim as today).
+    pub(crate) fn stage_tag(config: &ConfigSet, jp: &JobParams) -> Result<Option<String>, String> {
+        let action = config
+            .armed(&jp.action_id)
+            .ok_or_else(|| format!("action {:?} is not armed", jp.action_id))?;
+        steps::action_service_key(action, config)
+    }
+
+    /// Reload re-tag: every queued seam job's `service` is re-resolved under the current config.
+    fn retag_queued_stage_jobs(&self) {
+        let config = Arc::clone(&read(&self.config));
+        let mut db = lock(&self.state);
+        let queued = match db.queued_jobs() {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(error = %e, "re-tag: listing queued jobs failed");
+                return;
+            }
+        };
+        for job in queued {
+            let Ok(jp) = serde_json::from_value::<JobParams>(job.params.clone()) else {
+                continue;
+            };
+            if !jp.is_stage() {
+                continue;
+            }
+            let Ok(tag) = Self::stage_tag(&config, &jp) else {
+                continue;
+            };
+            if tag != job.service
+                && let Err(e) = db.retag_queued(&job.id, tag.as_deref())
+            {
+                tracing::warn!(job_id = %job.id, error = %e, "re-tag failed");
+            }
+        }
+    }
+
     /// [`Self::enqueue`] for a scheduled run: the job and `action`'s `schedule_runs` row commit in
     /// one transaction (SR10).
     fn enqueue_scheduled(&self, action: &Action, req: RunRequest) -> Result<String, EnqueueError> {
@@ -646,3 +799,5 @@ impl Inner {
 mod tests;
 #[cfg(test)]
 mod tests_daemon;
+#[cfg(test)]
+mod tests_stage;

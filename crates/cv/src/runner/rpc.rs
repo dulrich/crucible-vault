@@ -105,7 +105,7 @@ pub async fn run_action(
         (!action.durable).then(|| shared.subscribe());
     let req = RunRequest::command(params, p.context.clone());
     let job_id = runner.enqueue(action, req).map_err(|e| match e {
-        EnqueueError::NoResourceKeys(m) => invalid(m),
+        EnqueueError::NoResourceKeys(m) | EnqueueError::Admission(m) => invalid(m),
         EnqueueError::State(m) => rpc_err(error_codes::INTERNAL_ERROR, m),
     })?;
     let mut out = RunActionResult {

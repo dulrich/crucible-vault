@@ -330,6 +330,7 @@ fn scratch_dry_run() {
         state: &state,
         writer: Some(writer),
         children: &super::testkit::NoChildren,
+        admitter: &super::NoAdmitter,
         written: Vec::new(),
         guard: None,
     };

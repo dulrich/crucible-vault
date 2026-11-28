@@ -156,6 +156,12 @@ pub struct StepOutcome {
     /// Stop the action here, successfully (e.g. a guard that does not hold).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stop: bool,
+    /// The step made a real provider or service attempt (plan intake-stage-jobs WP-1): a stage
+    /// job counts as a breaker success only when a step run **in this claim** sets it. Persisted
+    /// with the checkpoint (an older checkpoint decodes `false`), but the runner never reads it
+    /// from a replayed checkpoint: replay is not an attempt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attempted: bool,
 }
 
 impl StepOutcome {
@@ -376,6 +382,88 @@ pub trait ChildSpawner {
     }
 }
 
+/// Result of a stage admission ([`StageAdmitter::admit_stage`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// A new stage job was queued (its id).
+    Inserted(String),
+    /// A queued or running job of that action already holds the note (its id).
+    Duplicate(String),
+}
+
+/// The runner's one enqueue origin for stage actions (plan intake-stage-jobs WP-1), beside
+/// [`ChildSpawner`]: a chain-free background job of a `stage`-marked action on one note, deduped
+/// on `{action}::{note id}`, tagged at enqueue with its breaker key and keyed by the note id.
+/// Refuses an action without a stage marker and a note with no bound id (the caller retries after
+/// binding).
+pub trait StageAdmitter {
+    /// Admits `action_id` for the note at `note_path`.
+    fn admit_stage(&self, action_id: &str, note_path: &str) -> Result<Admission, String>;
+}
+
+/// Outside a runner: no admission.
+#[cfg(test)]
+pub(crate) struct NoAdmitter;
+
+#[cfg(test)]
+impl StageAdmitter for NoAdmitter {
+    fn admit_stage(&self, _: &str, _: &str) -> Result<Admission, String> {
+        Err("stage admission is not available here".into())
+    }
+}
+
+/// The breaker key a run of `step` defers under, from its params and `config`, without running
+/// it (plan intake-stage-jobs WP-1, "service at enqueue"): each arm reuses the resolution the
+/// step itself performs, so the key equals the string its deferral stamps. `Ok(None)`: the step
+/// calls no breaker-gated service. `Err`: the step calls a service whose key is not static under
+/// one config snapshot (such a step cannot be a stage body).
+pub fn service_key(step: &Step, config: &ConfigSet) -> Result<Option<String>, String> {
+    let t = &step.params;
+    match step.kind {
+        StepKind::ImageDescribe => image_describe::service_key(config),
+        StepKind::Agent => agent::step_service_key(t, config).map(Some),
+        StepKind::TranscriptRefine => transcript_refine::service_key(t, config).map(Some),
+        StepKind::IntakeEnrich => intake_enrich::service_key(t, config),
+        StepKind::YtMetadata | StepKind::YtChannelEnrich => {
+            Ok(Some(cv_providers::web::youtube::SERVICE.to_owned()))
+        }
+        StepKind::Localize => Ok(Some(localize::SERVICE.to_owned())),
+        StepKind::SearchUpsert => search::service_key(step.kind, t, config),
+        StepKind::XDiscover
+        | StepKind::XMetadata
+        | StepKind::XBackfill
+        | StepKind::TrackYoutube
+        | StepKind::TrackBlogs
+        | StepKind::DailyBrief => Err(format!("{} has no static breaker key", step.kind.as_str())),
+        _ => Ok(None),
+    }
+}
+
+/// The one breaker key of a stage action: every step's [`service_key`] (`None` = untagged).
+/// More than one distinct key is a config error (the action is disarmed with this message).
+pub fn action_service_key(action: &Action, config: &ConfigSet) -> Result<Option<String>, String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for (n, step) in action.steps.iter().enumerate() {
+        if let Some(k) = service_key(step, config).map_err(|e| {
+            format!(
+                "stage action step {} ({}): {e}",
+                n + 1,
+                step.kind().as_str()
+            )
+        })? {
+            keys.insert(k);
+        }
+    }
+    if keys.len() > 1 {
+        let list: Vec<&str> = keys.iter().map(String::as_str).collect();
+        return Err(format!(
+            "stage action resolves to more than one service key ({}); a stage job holds one service",
+            list.join(", ")
+        ));
+    }
+    Ok(keys.pop_first())
+}
+
 /// Everything a step sees. Built per step by the runner.
 pub struct StepCtx<'a> {
     /// The running action.
@@ -405,6 +493,8 @@ pub struct StepCtx<'a> {
     pub state: &'a Arc<Mutex<StateDb>>,
     pub(crate) writer: Option<WriterHandle>,
     pub(crate) children: &'a dyn ChildSpawner,
+    /// The runner's stage admission seam ([`NoAdmitter`] outside a runner).
+    pub(crate) admitter: &'a dyn StageAdmitter,
     pub(crate) written: Vec<String>,
     /// Arms the runner's cycle guard for a path before the write that mutates it is issued
     /// (plan note-path-continuity D5); `None` outside a runner.
@@ -571,6 +661,7 @@ impl<'a> StepCtx<'a> {
             state: self.state,
             writer: self.writer.clone(),
             children: self.children,
+            admitter: self.admitter,
             written: Vec::new(),
             guard: self.guard,
         }

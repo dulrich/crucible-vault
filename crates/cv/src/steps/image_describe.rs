@@ -658,3 +658,23 @@ fn describe(
 #[cfg(test)]
 #[path = "image_describe_tests.rs"]
 mod tests;
+
+/// The breaker key of an `image_describe` step: the describe pipeline's provider id, resolved as
+/// [`run`] resolves it (a failed description defers under `provider.id`); `None` when the
+/// pipeline is disabled (no provider is called).
+pub(crate) fn service_key(config: &ConfigSet) -> Result<Option<String>, String> {
+    let cfg = &config.pipelines().image_describe;
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    let provider_id = cfg
+        .provider
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
+    let provs = agent::providers(config)?;
+    provs
+        .get(&provider_id)
+        .map(|p| Some(p.id.clone()))
+        .ok_or_else(|| format!("image_describe: unknown provider {provider_id:?}"))
+}
