@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.6.0 — 2026-11-27
+
+### Added
+
+- `cv intake pending [--days N] [--verbose]`: a read-only, daemon-free report of the intake notes created in the last N days (default 30) by stage and state (done, pending, skipped, unfinished, failed, stuck). Done is judged from evidence in the note, so an enrich miss or a describe run that left images unattempted shows as unfinished (D39).
+- Learned publication hosts: the daemon learns a publication's second host (a feed on one host whose post links are on another, or a matched sender's mail on a record with no feed), so the mail copy and the RSS copy of a post match in either arrival order without both hosts in `sources.toml`. A host named by any record's feed, `hosts` or `prefix` is never learned, and a learned host is dropped when a later edit configures it. Settings, Sources lists learned hosts read-only (D39).
+
+### Changed
+
+- One match rule at every intake matching site (supersede and its finalize fallback, `intake_finalize`, the reconcile's backfill and repair phases, `dupes-scan`): both sides are compared by the same match keys. Matching widens and never narrows. `dupes-scan` and finalize now match through canonical URL forms (YouTube, X, arXiv, tracking parameters, a trailing slash) and publication aliases, where they compared a raw post id or an exact stored URL before; `dupes-scan` may label pairs it did not label before. Stored ids in notes and tracker rows are unchanged.
+- `intake_finalize` links a still-unlinked tracker row stored under another URL form of the same post when another row of the note is already linked; it never takes over a row linked to another note.
+- `state.db` moves to schema v22 (stage outcomes and learned hosts). The step applies on the first start; no migration.
+
+### Fixed
+
+- An arXiv URL with a trailing slash (`/pdf/<id>/`) canonicalizes to the same `abs` form as the other arXiv forms.
+
 ## 1.5.0 — 2026-11-23
 
 ### Added
