@@ -96,7 +96,6 @@ fn a_host_configured_on_b_is_never_learned_for_a_on_learning_or_reload() {
         &before,
         FEED,
         "https://other.example/p/1",
-        "g1",
         1
     ));
     assert!(observe_feed_item(
@@ -104,7 +103,6 @@ fn a_host_configured_on_b_is_never_learned_for_a_on_learning_or_reload() {
         &before,
         FEED,
         "https://letter.example/p/1",
-        "g2",
         1
     ));
     // First proof wins: Other cannot take it.
@@ -176,4 +174,61 @@ fn learned_host_joins_mail_and_rss_copies_in_both_orders() {
     ));
     let (m, r) = keys(&rows(&lock(&s)));
     assert!(intersects(&m, &r) && intersects(&r, &m));
+}
+
+#[test]
+fn a_live_link_proves_its_host_even_when_the_guid_is_the_link() {
+    let (_d, s) = db();
+    let src = sources("");
+    // The parsed item had a `<link>` on a foreign host whose GUID equals it: proof.
+    assert!(observe_feed_item(
+        &mut lock(&s),
+        &src,
+        FEED,
+        "https://letter.example/p/1",
+        1
+    ));
+    assert_eq!(
+        learned(&s),
+        [("letter.example".to_owned(), "Letter".to_owned())]
+    );
+}
+
+#[test]
+fn a_live_item_without_a_link_proves_nothing() {
+    use cv_ingest::blogs::{BodyMode, posts_from_feed};
+    use cv_ingest::feed::FeedItem;
+    let (_d, s) = db();
+    let src = sources("");
+    // Parsed items: one with no `<link>` and a URL-shaped GUID on a foreign host, one whose
+    // `<link>` equals its GUID on a foreign host.
+    let items = [
+        FeedItem {
+            guid: "https://guid.example/x/1".into(),
+            ..FeedItem::default()
+        },
+        FeedItem {
+            link: "https://letter.example/p/2".into(),
+            guid: "https://letter.example/p/2".into(),
+            ..FeedItem::default()
+        },
+    ];
+    let posts = posts_from_feed(
+        &items,
+        cv_text::url_canon::CanonMethod::Auto,
+        BodyMode::Auto,
+    );
+    assert_eq!(posts.len(), 2);
+    // The stored URL is unchanged (`link || guid`); only the evidence differs.
+    assert_eq!(posts[0].url, "https://guid.example/x/1");
+    assert!(!posts[0].has_link);
+    assert!(posts[1].has_link);
+    for p in &posts {
+        let link = if p.has_link { p.url.as_str() } else { "" };
+        observe_feed_item(&mut lock(&s), &src, FEED, link, 1);
+    }
+    assert_eq!(
+        learned(&s),
+        [("letter.example".to_owned(), "Letter".to_owned())]
+    );
 }

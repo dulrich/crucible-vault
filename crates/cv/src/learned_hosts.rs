@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use cv_actions::SourcesConfig;
-use cv_actions::sources::{LearnedRow, feed_link_host};
+use cv_actions::sources::{LearnedRow, feed_link_host, foreign_link_host};
 use cv_state::{LearnedHost, StateDb};
 
 use crate::sync::lock;
@@ -74,20 +74,21 @@ pub fn observe(
     }
 }
 
-/// An RSS item's observation: learns its link host for the feed's record per
-/// [`feed_link_host`].
+/// A live RSS item's observation: learns its link host for the feed's record per
+/// [`foreign_link_host`]. The evidence is the parsed item itself: `link` is the item's own
+/// non-empty `<link>` (empty when the item had none and its URL fell back to the GUID, which
+/// proves nothing). It holds whether or not the GUID equals the link.
 pub fn observe_feed_item(
     state: &mut StateDb,
     sources: &SourcesConfig,
     feed: &str,
-    url: &str,
-    item_id: &str,
+    link: &str,
     now_ms: i64,
 ) -> bool {
     let Some(p) = sources.by_feed(feed) else {
         return false;
     };
-    let Some(host) = feed_link_host(url, item_id, feed) else {
+    let Some(host) = foreign_link_host(link, feed) else {
         return false;
     };
     let name = p.name.clone();
@@ -115,7 +116,8 @@ pub fn prune(state: &mut StateDb, sources: &SourcesConfig) -> usize {
 }
 
 /// The start-up seed from recorded blog rows (`source_key` = feed URL). A row seeds its host
-/// only when [`feed_link_host`] proves it (http(s), not the GUID, a host other than the feed's),
+/// only when [`feed_link_host`] proves it (the stored-row evidence: http(s), `url` not the GUID —
+/// a stored row cannot tell a link from a URL-shaped GUID — and a host other than the feed's),
 /// the host is not reserved, the feed's record exists, and within this pass the host is
 /// observed under exactly one publication. Idempotent: a second run inserts nothing. Prunes
 /// first. Returns the number inserted.

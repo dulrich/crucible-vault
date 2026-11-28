@@ -555,12 +555,23 @@ pub struct LearnedRow {
     pub publication: String,
 }
 
-/// The host a feed item's link proves for the feed's publication (plan `intake-foundations`
-/// WP-3, deferred audit item E1): `Some` only when `url` is http(s), is provably the item's link
-/// and not its GUID — it differs from `item_id` as written and canonically (the blog tracker's
-/// `url` is `link || guid` and its `item_id` is `guid`, else the canonical link, so a row with
-/// no link has `url == item_id`) — and its canonical host differs from the feed's. The ownership
-/// rule ([`SourcesConfig::may_learn`]) is the caller's next check.
+/// The one host predicate both learned-host paths share (plan `intake-foundations` WP-3): `Some`
+/// with `link`'s canonical bare host when `link` is http(s) and that host differs from the
+/// feed's. It judges only hosts; each caller supplies its own evidence that `link` is a link.
+#[must_use]
+pub fn foreign_link_host(link: &str, feed: &str) -> Option<String> {
+    let link = link.trim();
+    http_host(link)?;
+    let host = canonical_bare_host(link)?;
+    (canonical_bare_host(feed.trim()).as_deref() != Some(host.as_str())).then_some(host)
+}
+
+/// The host a *stored* blog row proves for the feed's publication (the start-up seed; plan
+/// `intake-foundations` WP-3, deferred audit item E1): a stored row cannot tell a link from a
+/// URL-shaped GUID, so `Some` only when `url` differs from `item_id` as written and canonically
+/// (the blog tracker's `url` is `link || guid` and its `item_id` is `guid`, else the canonical
+/// link, so a row with no link has `url == item_id`) and [`foreign_link_host`] holds. The
+/// ownership rule ([`SourcesConfig::may_learn`]) is the caller's next check.
 #[must_use]
 pub fn feed_link_host(url: &str, item_id: &str, feed: &str) -> Option<String> {
     let (url, id) = (url.trim(), item_id.trim());
@@ -572,8 +583,7 @@ pub fn feed_link_host(url: &str, item_id: &str, feed: &str) -> Option<String> {
     if canon(url).is_some_and(|c| Some(c) == canon(id)) {
         return None;
     }
-    let host = canonical_bare_host(url)?;
-    (canonical_bare_host(feed.trim()).as_deref() != Some(host.as_str())).then_some(host)
+    foreign_link_host(url, feed)
 }
 
 #[cfg(test)]

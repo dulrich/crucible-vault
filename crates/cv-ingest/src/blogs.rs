@@ -64,6 +64,9 @@ pub struct BlogPost {
     pub title: String,
     /// Post URL (`link || guid`).
     pub url: String,
+    /// Whether `url` is the item's own non-empty `<link>` (false: it fell back to the GUID).
+    /// Not stored; the learned-host observation's evidence (plan `intake-foundations` WP-3).
+    pub has_link: bool,
     /// `YYYY-MM-DD` when parseable, else the raw string.
     pub published: String,
     /// Deduplicated authors.
@@ -140,6 +143,7 @@ pub fn posts_from_feed(items: &[FeedItem], canon: CanonMethod, body: BodyMode) -
                     title.to_owned()
                 },
                 url: url.to_owned(),
+                has_link: !it.link.trim().is_empty(),
                 published: normalize_published(&it.published),
                 authors: dedupe(&it.authors),
                 body_html,

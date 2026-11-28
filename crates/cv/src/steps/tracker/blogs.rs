@@ -567,13 +567,13 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             };
             let full = Some(post.has_body());
             // Plan intake-foundations WP-3: every observed item (seen or new) may prove its link
-            // host for this feed's publication under the ownership rule.
+            // host for this feed's publication under the ownership rule; only a real `<link>` is
+            // evidence (a GUID fallback proves nothing).
             crate::learned_hosts::observe_feed_item(
                 &mut ctx.state(),
                 ctx.config.sources(),
                 &key,
-                &post.url,
-                &post.post_id,
+                if post.has_link { &post.url } else { "" },
                 crate::now_ms(),
             );
             let recorded = ctx
