@@ -41,7 +41,7 @@ Of the 597 pending, 596 are blog notes and 1 is YouTube (`--verbose` output coun
 
 - **The last week is close to converged:** 4 of 82 notes lack enrichment, and the non-model stages have one or two stragglers each. That is the size of the flakiness the diagnosis describes.
 - **About 565 blog notes created 7 to 14 days ago have no enrichment.** That is a bulk arrival, not the event path dropping items one at a time. The report cannot say whether they were never eligible (a precondition the enrich step checks and nothing records) or never attempted; that distinction is exactly what recorded outcomes will add.
-- **Consequence for `plans/intake-stage-jobs.md`:** with a 30-day window the convergence sweep would see about 600 pending model stages, four times the 150 at which that plan holds for the user. The window, the caps, or an eligibility rule for bulk arrivals has to be chosen before that plan's sweep package, and its audit should see these numbers.
+- **Consequence for the `intake-stage-jobs` plan:** with a 30-day window the convergence sweep would see about 600 pending model stages, four times the 150 at which that plan holds for the user. The window, the caps, or an eligibility rule for bulk arrivals has to be chosen before that plan's sweep package, and its audit should see these numbers.
 - **The diagnosis counted 415 blog, mail and news notes for the same 30 days** by day folder; this report counts 979 blog and mail notes by their `created` date and intake keys. The populations differ (every note with a `post-id` is a blog note here), so the two figures are not comparable.
 
 ## A defect this run found
