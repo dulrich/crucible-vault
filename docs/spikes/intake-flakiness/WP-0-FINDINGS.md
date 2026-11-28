@@ -8,15 +8,15 @@ Measured on the live host before plan `intake-convergence` was written. All numb
 - Joined in `sqlite3 :memory:` against `~/.local/state/crucible-vault/state.db` opened `mode=ro` (`tracker_items`, `jobs`).
 - `cv status`, `cv jobs stats [--since 7d]`, `cv jobs list --status failed|queued`, `journalctl --user -u crucible-vault.service --since 2026-11-20 | grep -iE 'breaker|unhealthy'`, `curl http://127.0.0.1:4811/v1/models`.
 - Code facts: two read-only passes over `crates/cv/src/{steps,runner,daemon}`, `crates/cv-ingest`, `crates/cv-actions/src/sources`, `crates/cv-text/src/url_canon.rs` and the live `_custom/crucible-vault/*.toml`; the anchors below were re-read by the orchestrator.
-- History: every intake defect recorded in `plans/` and `docs/` (71 rows), classified by mechanism.
+- History: every intake defect recorded in the repo's plan and design documents (71 rows), classified by mechanism.
 
-## The four `FEEDBACK.md` incidents
+## The four reported incidents
 
 | Incident | What happened |
 |---|---|
 | YouTube clip, 2026-11-27: "no auto-refine fired" | Filed in under 1 s. Its `clip-enrich` job is `queued … deferred: service local unhealthy` (attempt 2). `127.0.0.1:4811` refuses connections. Step 2 of `clip-enrich` is `image_describe`, the only step that needs `local`; the deferral parks the whole job, so `yt_metadata` (network), `transcript_refine` and `intake_enrich` (router) wait behind it. Nothing in the note or the editor says a stage is pending. |
 | YouTube clip, 2026-11-22: "did not complete intake" | It did complete: `clip-enrich` ran 15:12:43–15:14:36. The note was clipped again at 15:14:18, 95 s in, before the first run settled. The run had no visible progress. |
-| One post, two notes on two hosts (2026-11-23) | Mail copy: `pub-b.substack.com`. RSS copy: `www.pub-b.co` (the item link host of a feed served from the Substack host). The publication's host list is built from `feeds` + `hosts` only, so the custom domain is not in it; the post-id is origin + path; neither identity keys nor reconcile phase E can match. Aliasing is built (`hosts`), not configured, and nothing learns it. |
+| One post, two notes on two hosts (2026-11-23) | Mail copy: `<publication>.substack.com`. RSS copy: the publication's custom domain (the item link host of a feed served from the Substack host). The publication's host list is built from `feeds` + `hosts` only, so the custom domain is not in it; the post-id is origin + path; neither identity keys nor reconcile phase E can match. Aliasing is built (`hosts`), not configured, and nothing learns it. |
 | Create Source from a fanfiction.net note | Proposed prefix is the chapter URL, proposed name is the base URL. Not re-measured; code path `propose_source`. |
 
 ## Prevalence, notes created since 2026-10-28
