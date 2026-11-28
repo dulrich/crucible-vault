@@ -2,8 +2,9 @@
 //! duplicate scan behind the `dupes-scan` action. It labels candidate pairs and never removes
 //! anything. It is note-mutating (`mutates_note`).
 //!
-//! **Signals (Decision 4).** A note's identity is recomputed from `source` with the daemon's
-//! configured `PostIdOptions` (`post_id_from_url`, which falls back to the trimmed URL); the
+//! **Signals (Decision 4).** A note's identity is its match keys ([`cv_ingest::identity`], plan
+//! intake-foundations WP-2), derived from `source` with the daemon's configured `PostIdOptions`
+//! and publication hosts; two notes match when their keys intersect; the
 //! stored `post-id` is used only when there is no `source` (16.4% of stored ids are stale, spike
 //! `docs/spikes/postid-dupes/`). Containment is `cv_text::similar` shingle containment, both
 //! directions. [`score`] is the one-pair scorer WP-8 reuses; [`PairScore::keep`] is the scan's
@@ -41,6 +42,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use cv_actions::{ConfigSet, StepKind};
+use cv_ingest::identity::{MatchKeys, NoteFacts, PublicationHosts, intersects, note_keys};
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_text::resolver::Resolver;
 use cv_text::similar::Shingles;
@@ -132,41 +134,67 @@ impl PairScore {
     }
 }
 
-/// The daemon's configured post-id options (the blog `canon` host rules, as `signals.rs`).
-pub(crate) fn post_id_options(config: &ConfigSet) -> PostIdOptions {
-    PostIdOptions {
-        method: None,
-        host_rules: build_blog_canon_host_map(
-            config
-                .sources()
-                .feeds()
-                .map(|(l, b)| (l, b.canon().method())),
-        ),
+/// What `dupes-scan` derives match keys with: the daemon's configured post-id options (the blog
+/// `canon` host rules, as `signals.rs`) and the publication hosts.
+pub(crate) struct KeyOptions {
+    pub(crate) post_id: PostIdOptions,
+    pub(crate) pubs: PublicationHosts,
+}
+
+/// The scan's [`KeyOptions`] from `config`.
+pub(crate) fn post_id_options(config: &ConfigSet) -> KeyOptions {
+    KeyOptions {
+        post_id: PostIdOptions {
+            method: None,
+            host_rules: build_blog_canon_host_map(
+                config
+                    .sources()
+                    .feeds()
+                    .map(|(l, b)| (l, b.canon().method())),
+            ),
+        },
+        pubs: crate::supersede::publication_hosts(config.sources()),
     }
 }
 
-/// A note's identity: `post_id_from_url(source)` when it has a `source`, else its stored
-/// `post-id`, else none. The stored id never wins over `source` (it may be stale).
-pub(crate) fn identity(doc: &FrontmatterDoc, opts: &PostIdOptions) -> Option<String> {
-    let nonempty = |k: &str| {
-        doc.get_str(k)
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-    };
-    if let Some(src) = nonempty("source") {
-        return Some(post_id_from_url(&src, opts)).filter(|s| !s.is_empty());
+fn nonempty(doc: &FrontmatterDoc, k: &str) -> Option<String> {
+    doc.get_str(k)
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// A note's identity for display: `post_id_from_url(source)` when it has a `source`, else its
+/// stored `post-id`, else none. The stored id never wins over `source` (it may be stale).
+pub(crate) fn identity(doc: &FrontmatterDoc, opts: &KeyOptions) -> Option<String> {
+    if let Some(src) = nonempty(doc, "source") {
+        return Some(post_id_from_url(&src, &opts.post_id)).filter(|s| !s.is_empty());
     }
-    nonempty("post-id")
+    nonempty(doc, "post-id")
+}
+
+/// A note's match keys ([`cv_ingest::identity::note_keys`], with the configured post-id): from
+/// `source` when it has one, else from its stored `post-id` (which may be stale).
+pub(crate) fn match_keys(doc: &FrontmatterDoc, opts: &KeyOptions) -> MatchKeys {
+    let (sources, post_ids): (Vec<String>, Vec<String>) = match nonempty(doc, "source") {
+        Some(s) => (vec![s], Vec::new()),
+        None => (Vec::new(), nonempty(doc, "post-id").into_iter().collect()),
+    };
+    let facts = NoteFacts {
+        sources: &sources,
+        post_ids: &post_ids,
+        ..NoteFacts::default()
+    };
+    note_keys(&facts, &opts.pubs, Some(&opts.post_id))
 }
 
 /// Scores one pair of notes from their full texts (frontmatter is split off; containment is
 /// over the bodies, exact `u64` shingles).
-pub(crate) fn score(a_text: &str, b_text: &str, opts: &PostIdOptions) -> PairScore {
+pub(crate) fn score(a_text: &str, b_text: &str, opts: &KeyOptions) -> PairScore {
     let (a, b) = (FrontmatterDoc::new(a_text), FrontmatterDoc::new(b_text));
-    let (ia, ib) = (identity(&a, opts), identity(&b, opts));
+    let (ka, kb) = (match_keys(&a, opts), match_keys(&b, opts));
     let (sa, sb) = (Shingles::from_text(a.body()), Shingles::from_text(b.body()));
     PairScore {
-        identity_match: ia.is_some() && ia == ib,
+        identity_match: intersects(&ka, &kb),
         containment_a_in_b: sa.containment_in(&sb),
         containment_b_in_a: sb.containment_in(&sa),
     }
@@ -199,7 +227,7 @@ struct Note {
     id: i64,
     path: String,
     top: String,
-    identity: Option<String>,
+    keys: MatchKeys,
     not_dup: Vec<i64>,
     labelled: Vec<i64>,
     /// Full shingle count (0 = below [`MIN_SHINGLES`], identity only).
@@ -316,7 +344,7 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         notes.push(Note {
             id,
             top: top_of(&path).to_owned(),
-            identity: identity(&doc, &opts),
+            keys: match_keys(&doc, &opts),
             not_dup: linked_ids(&doc, NOT_DUP_KEY, &resolver, &path, id),
             labelled: linked_ids(&doc, POSSIBLE_KEY, &resolver, &path, id),
             path,
@@ -387,7 +415,7 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     {
         vars.notes = notes.len() as u32;
     }
-    let ident_eq = |a: &Note, b: &Note| a.identity.is_some() && a.identity == b.identity;
+    let ident_eq = |a: &Note, b: &Note| intersects(&a.keys, &b.keys);
     let mut kept: BTreeMap<(u32, u32), PairScore> = BTreeMap::new();
     let consider =
         |a: usize, b: usize, kept: &mut BTreeMap<(u32, u32), PairScore>, v: &mut Vars| {
@@ -459,8 +487,8 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     // Identity groups.
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, n) in notes.iter().enumerate() {
-        if let Some(id) = &n.identity {
-            groups.entry(id.as_str()).or_default().push(i);
+        for k in &n.keys {
+            groups.entry(k.as_str()).or_default().push(i);
         }
     }
     let groups: Vec<Vec<usize>> = groups.into_values().filter(|g| g.len() >= 2).collect();

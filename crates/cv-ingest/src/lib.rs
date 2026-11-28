@@ -14,6 +14,7 @@ pub mod feed;
 pub mod fm;
 pub mod fold;
 pub mod html;
+pub mod identity;
 pub mod mail;
 pub mod rename_plan;
 pub mod signals;

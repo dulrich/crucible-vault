@@ -747,6 +747,20 @@ impl StateDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Rows whose `url` contains `needle` (a match-key probe, plan intake-foundations WP-2:
+    /// callers then compare match keys), oldest first. An empty needle returns nothing.
+    pub fn tracker_items_url_containing(&self, needle: &str) -> Result<Vec<TrackerItem>> {
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE instr(url, ?1) > 0
+             ORDER BY first_seen_ms, source_kind, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map(params![needle], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Rows of `source_kind` whose `item_id` is `item_id`, any source key (plan
     /// intake-followups-mail-youtube WP-4: a YouTube clip resolves its rows by video id), oldest
     /// first.

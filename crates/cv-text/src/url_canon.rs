@@ -197,7 +197,9 @@ pub fn canonicalize_url(raw: &str) -> Option<CanonicalizedUrl> {
             youtube_video_id = Some(id);
         }
     } else if ARXIV_HOSTS.contains(&host.as_str()) {
-        if let Some(id) = captures1(&ARXIV_RE, parsed.path()) {
+        // The trailing slash is trimmed first, so `/pdf/<id>/` rewrites like `/pdf/<id>`
+        // (plan intake-foundations WP-2).
+        if let Some(id) = captures1(&ARXIV_RE, parsed.path().trim_end_matches('/')) {
             parsed.set_host(Some("arxiv.org")).ok()?;
             parsed.set_path(&format!("/abs/{id}"));
             parsed.set_query(None);
@@ -720,6 +722,14 @@ mod tests {
         assert_eq!((a.x_status_id, a.youtube_video_id), (None, None));
         let p = canonicalize_url("https://www.arxiv.org/pdf/2301.12345.pdf").unwrap();
         assert_eq!(p.canonical, "https://arxiv.org/abs/2301.12345");
+        // Trailing slash before the rewrite (was `https://arxiv.org/pdf/2301.12345`).
+        for u in [
+            "https://arxiv.org/pdf/2301.12345/",
+            "https://arxiv.org/abs/2301.12345/?context=cs",
+        ] {
+            let t = canonicalize_url(u).unwrap();
+            assert_eq!(t.canonical, "https://arxiv.org/abs/2301.12345", "{u}");
+        }
     }
 
     #[test]

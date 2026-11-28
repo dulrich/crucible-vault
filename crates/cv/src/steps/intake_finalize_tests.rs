@@ -233,6 +233,41 @@ fn blog_rows_go_through_finalize_and_set_rows_stay_untouched() {
     );
 }
 
+/// Plan intake-foundations WP-2: with one row of the note already linked, an unlinked alias row
+/// (another stored URL form of the same post) is found by match key and linked too; a row of
+/// another post is not.
+#[test]
+fn unlinked_alias_row_joins_an_already_linked_row() {
+    let e = env(&[(
+        "notes/alias.md",
+        format!("---\nsource: https://ex.test/p/alias\n---\n{}\n", words(30)),
+    )]);
+    add(
+        &e,
+        "blog",
+        "a",
+        "https://ex.test/p/alias",
+        Some("notes/alias.md"),
+        None,
+    );
+    add(
+        &e,
+        "blog",
+        "b",
+        "https://EX.test/p/alias/?utm_source=feed",
+        None,
+        None,
+    );
+    add(&e, "blog", "c", "https://ex.test/p/alias-two", None, None);
+    let o = run_on(&e, "notes/alias.md");
+    assert_eq!(counts(&o)[..2], [json!(2), json!(1)]);
+    assert_eq!(
+        row(&e, "blog", "b").0.note_path.as_deref(),
+        Some("notes/alias.md")
+    );
+    assert_eq!(row(&e, "blog", "c").0.note_path, None);
+}
+
 /// D11: a missing finalize target is `NoteGone`, not a hard failure.
 #[test]
 fn missing_note_is_note_gone() {

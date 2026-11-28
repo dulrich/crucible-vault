@@ -135,11 +135,10 @@ pub(super) fn youtube(
         {
             p
         } else {
-            let urls = [
-                r.url.clone(),
-                format!("https://www.youtube.com/watch?v={}", r.item_id),
-            ];
-            let m = index(sidx, ctx)?.identity_matches(&urls, None);
+            let idx = index(sidx, ctx)?;
+            let keys =
+                cv_ingest::identity::row_keys(&r.source_kind, &r.url, &r.item_id, idx.pubs());
+            let m = idx.key_matches(&keys, None);
             match m.as_slice() {
                 [p] => p.clone(),
                 [] => {

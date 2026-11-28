@@ -4,7 +4,7 @@
 //! caller creates or records anything:
 //!
 //! 1. **identity**: index notes whose `source` (canonicalized on both sides,
-//!    [`cv_ingest::supersede::identity_keys_in`], with the publication-scoped key) or `post-id` equals one of the item's keys;
+//!    [`cv_ingest::identity`] match keys, with the publication-scoped key) or `post-id` equals one of the item's keys;
 //! 2. otherwise **containment**: notes from the same source (index `source` host, and an
 //!    overlapping `author` when both have one, plus `tracker_items` rows of the caller's source
 //!    with a `note_path`) dated within ±`[supersede] window_days` of the item (a missing date is in
@@ -31,7 +31,8 @@ use std::collections::{BTreeSet, HashMap};
 use chrono::NaiveDate;
 use cv_actions::pipelines::{Publication, SourcesConfig, SupersedeConfig};
 use cv_ingest::access::Access;
-use cv_ingest::supersede::{Decision, PublicationHosts, Side, decide, identity_keys_in, overlap};
+use cv_ingest::identity::{MatchKeys, row_keys, url_probe, value_keys};
+use cv_ingest::supersede::{Decision, PublicationHosts, Side, decide, overlap};
 use cv_note::{FrontmatterDoc, JsValue, calculate_word_count};
 use cv_text::similar::Shingles;
 use cv_text::url_canon::canonical_bare_host;
@@ -224,23 +225,37 @@ impl SupersedeIndex {
 
     /// Records `path` under every identity key of `value` (a URL or a post id).
     pub fn insert_identity(&mut self, path: &str, value: &str) {
-        for k in identity_keys_in(value, &self.pubs) {
+        for k in value_keys(value, &self.pubs, None) {
             self.by_key.entry(k).or_default().insert(path.to_owned());
         }
+    }
+
+    /// The publication hosts the index derives its keys with.
+    #[must_use]
+    pub fn pubs(&self) -> &PublicationHosts {
+        &self.pubs
+    }
+
+    /// Notes matching any of `keys` (from [`cv_ingest::identity`]), sorted, `exclude` left out.
+    #[must_use]
+    pub fn key_matches(&self, keys: &MatchKeys, exclude: Option<&str>) -> Vec<String> {
+        let mut out = BTreeSet::new();
+        for k in keys {
+            if let Some(ps) = self.by_key.get(k) {
+                out.extend(ps.iter().filter(|p| Some(p.as_str()) != exclude).cloned());
+            }
+        }
+        out.into_iter().collect()
     }
 
     /// Notes matching any identity key of `urls`, sorted, `exclude` left out.
     #[must_use]
     pub fn identity_matches(&self, urls: &[String], exclude: Option<&str>) -> Vec<String> {
-        let mut out = BTreeSet::new();
-        for u in urls {
-            for k in identity_keys_in(u, &self.pubs) {
-                if let Some(ps) = self.by_key.get(&k) {
-                    out.extend(ps.iter().filter(|p| Some(p.as_str()) != exclude).cloned());
-                }
-            }
-        }
-        out.into_iter().collect()
+        let keys: MatchKeys = urls
+            .iter()
+            .flat_map(|u| value_keys(u, &self.pubs, None))
+            .collect();
+        self.key_matches(&keys, exclude)
     }
 
     /// Whether any note matches `url` by identity.
@@ -563,14 +578,52 @@ fn save_old_with(s: &StateProbe<'_>, path: &str, text: &str) -> std::io::Result<
 /// Writes the resolved evidence to the resolved note's tracker rows (by `note_path`, else by
 /// URL), then ticks them only when the resolved body is complete (audit M2).
 fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Result<(), StepError> {
+    let pubs = publication_hosts(ctx.config.sources());
     let mut db = ctx.state();
     let mut rows = db.tracker_items_for_note(path)?;
     if rows.is_empty() {
-        for u in urls {
-            rows.extend(db.tracker_items_for_url(u)?);
-        }
+        let keys: MatchKeys = urls
+            .iter()
+            .flat_map(|u| value_keys(u, &pubs, None))
+            .collect();
+        rows = tracker_rows_by_keys(&db, urls, &keys, &pubs)?;
     }
     finalize_rows(&mut db, rows, r)
+}
+
+/// The tracker rows whose match keys ([`row_keys`]) intersect `keys`, the keys of `values` (plan
+/// intake-foundations WP-2: the row side is keyed too, not compared by exact URL). Candidates
+/// are the rows whose stored `url` is a value or its canonical form, plus those containing a
+/// value's [`url_probe`]; each is kept only when its keys intersect. Deduplicated, oldest first
+/// per lookup.
+pub(crate) fn tracker_rows_by_keys(
+    db: &cv_state::StateDb,
+    values: &[String],
+    keys: &MatchKeys,
+    pubs: &PublicationHosts,
+) -> Result<Vec<cv_state::TrackerItem>, StepError> {
+    let mut cand = Vec::new();
+    for v in values {
+        cand.extend(db.tracker_items_for_url(v)?);
+        if let Some(c) = cv_text::canonicalize_url(v) {
+            cand.extend(db.tracker_items_for_url(&c.canonical)?);
+        }
+        if let Some(p) = url_probe(v) {
+            cand.extend(db.tracker_items_url_containing(&p)?);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    cand.retain(|r| {
+        seen.insert((
+            r.source_kind.clone(),
+            r.source_key.clone(),
+            r.item_id.clone(),
+        )) && cv_ingest::identity::intersects(
+            &row_keys(&r.source_kind, &r.url, &r.item_id, pubs),
+            keys,
+        )
+    });
+    Ok(cand)
 }
 
 /// Finalize's write for an already-resolved row set: every row gets `r`'s `access`/`complete`

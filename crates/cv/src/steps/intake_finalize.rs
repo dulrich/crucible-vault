@@ -6,10 +6,11 @@
 //! |---|---|---|
 //! | `path` | string (placeholders) | `vars.moved_path`, else the active/triggering note |
 //!
-//! 1. **Rows**: `tracker_items_for_note(path)`; else the rows whose `url` is one of the note's
-//!    `source` / `post-id` values (as written and canonicalized, `cv_text::canonicalize_url`);
-//!    else, for a note with a YouTube video id (`yt-video-id`, else from `source`), the
-//!    `youtube` rows with that `item_id`. Every resolved row with a NULL `note_path` is linked.
+//! 1. **Rows**: `tracker_items_for_note(path)` first, plus the still-unlinked rows whose match
+//!    keys intersect the note's (`source` / `post-id`, [`cv_ingest::identity`], both sides keyed;
+//!    plan intake-foundations WP-2) — or every key-matched row when none is linked; else, for a
+//!    note with a YouTube video id (`yt-video-id`, else from `source`), the `youtube` rows with
+//!    that `item_id`. Every resolved row with a NULL `note_path` is linked.
 //! 2. **Ticks** (rows whose status is already set — `x` or `-` — are never changed; a tick is
 //!    never undone):
 //!    - `youtube`: only when the note's **own** `source` (else `yt-video-id`) is that video and
@@ -30,6 +31,7 @@ use std::collections::BTreeSet;
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::Access;
+use cv_ingest::identity::{NoteFacts, note_keys};
 use cv_note::{FrontmatterDoc, JsValue, transcript_evidence};
 use cv_state::{TrackerEvidence, TrackerItem};
 use serde::Serialize;
@@ -115,19 +117,26 @@ fn resolve_rows(
     post_ids: &[String],
     video: Option<&str>,
 ) -> Result<Vec<TrackerItem>, StepError> {
+    let pubs = crate::supersede::publication_hosts(ctx.config.sources());
+    let keys = note_keys(
+        &NoteFacts {
+            sources,
+            post_ids,
+            ..NoteFacts::default()
+        },
+        &pubs,
+        None,
+    );
+    let values: Vec<String> = sources.iter().chain(post_ids).cloned().collect();
     let db = ctx.state();
     let mut rows = db.tracker_items_for_note(path)?;
+    let by_key = crate::supersede::tracker_rows_by_keys(&db, &values, &keys, &pubs)?;
     if rows.is_empty() {
-        let mut urls = BTreeSet::new();
-        for u in sources.iter().chain(post_ids) {
-            urls.insert(u.clone());
-            if let Some(c) = cv_text::canonicalize_url(u) {
-                urls.insert(c.canonical);
-            }
-        }
-        for u in &urls {
-            rows.extend(db.tracker_items_for_url(u)?);
-        }
+        rows = by_key;
+    } else {
+        // Linked rows first; an alias row of the same item that is still unlinked joins them
+        // (a row linked to another note is never taken over).
+        rows.extend(by_key.into_iter().filter(|r| r.note_path.is_none()));
     }
     if rows.is_empty()
         && let Some(id) = video

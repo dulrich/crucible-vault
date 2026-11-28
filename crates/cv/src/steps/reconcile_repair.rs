@@ -185,7 +185,8 @@ fn merge(
     c: &mut Counts,
 ) -> Result<(), StepError> {
     let mut rss = 0u32;
-    for m in idx.identity_matches(&[canon.to_owned()], Some(path)) {
+    let keys = cv_ingest::identity::mail_keys(None, Some(canon), idx.pubs());
+    for m in idx.key_matches(&keys, Some(path)) {
         match read_text(ctx, &m)? {
             None => {}
             Some(t) if is_rss_origin(&t, has_blog_row(ctx, &m)?) => rss += 1,
