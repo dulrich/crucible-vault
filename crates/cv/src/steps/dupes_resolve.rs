@@ -223,7 +223,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         return Ok(out);
     };
 
-    let opts = post_id_options(ctx.config);
+    let opts = post_id_options(ctx.config, &crate::learned_hosts::rows(&ctx.state()));
     let s = score(&k_text, &o_text, &opts);
     let label = DupLabel {
         keep_path: keep.clone(),

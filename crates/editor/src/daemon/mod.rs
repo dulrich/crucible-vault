@@ -230,6 +230,15 @@ pub trait DaemonClient: Send + Sync {
     ) -> Result<cv_protocol::NextFoldNoteResult> {
         Err(method_not_found("next_fold_note"))
     }
+    /// Plan intake-foundations WP-3: the learned publication hosts as `(host, publication)`,
+    /// read-only from the local `state.db` (none before schema v22).
+    fn learned_hosts(&self) -> Result<Vec<(String, String)>> {
+        let r = cv_state::StateReader::open(self.state_db())?;
+        Ok(r.learned_hosts()?
+            .into_iter()
+            .map(|h| (h.host, h.publication))
+            .collect())
+    }
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

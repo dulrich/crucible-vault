@@ -466,6 +466,12 @@ impl App {
                 if self.settings.section == Section::Hotkeys {
                     return self.fetch_actions();
                 }
+                if self.settings.section == Section::Sources {
+                    return Task::batch([
+                        self.refresh_status_if_open(),
+                        self.fetch_learned_hosts(),
+                    ]);
+                }
                 return self.refresh_status_if_open();
             }
             SettingsMsg::Hotkey(m) => return self.update_hotkeys(m),
@@ -485,6 +491,13 @@ impl App {
                 }
                 if s == Section::Status {
                     return Task::batch([restore, self.fetch_status()]);
+                }
+                if s == Section::Sources {
+                    return Task::batch([
+                        restore,
+                        self.settings_lookups(),
+                        self.fetch_learned_hosts(),
+                    ]);
                 }
                 return Task::batch([restore, self.settings_lookups()]);
             }
@@ -571,8 +584,21 @@ impl App {
             SettingsMsg::StatusLoaded(r) => self.settings.status.loaded(r),
             SettingsMsg::CreateSourceFromNote => return self.create_source_from_note(),
             SettingsMsg::SourceProposed(r) => return self.source_proposed(r),
+            SettingsMsg::LearnedHostsLoaded(r) => match r {
+                Ok(v) => self.settings.sources.learned = v,
+                Err(e) => tracing::warn!(error = %e, "learned hosts unreadable"),
+            },
         }
         Task::none()
+    }
+
+    /// Plan intake-foundations WP-3: reads the learned publication hosts (off the UI thread).
+    fn fetch_learned_hosts(&mut self) -> Task<Message> {
+        use crate::settings::SettingsMsg;
+        self.rpc(
+            |d| d.learned_hosts().map_err(|e| e.to_string()),
+            |r| Message::Settings(SettingsMsg::LearnedHostsLoaded(r)),
+        )
     }
 
     /// Plan sources-publication-model WP-7: asks the daemon (off the UI thread) which

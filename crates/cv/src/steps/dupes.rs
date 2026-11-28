@@ -41,6 +41,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use cv_actions::sources::LearnedRow;
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::identity::{MatchKeys, NoteFacts, PublicationHosts, intersects, note_keys};
 use cv_note::{FrontmatterDoc, JsValue};
@@ -142,7 +143,7 @@ pub(crate) struct KeyOptions {
 }
 
 /// The scan's [`KeyOptions`] from `config`.
-pub(crate) fn post_id_options(config: &ConfigSet) -> KeyOptions {
+pub(crate) fn post_id_options(config: &ConfigSet, learned: &[LearnedRow]) -> KeyOptions {
     KeyOptions {
         post_id: PostIdOptions {
             method: None,
@@ -153,7 +154,7 @@ pub(crate) fn post_id_options(config: &ConfigSet) -> KeyOptions {
                     .map(|(l, b)| (l, b.canon().method())),
             ),
         },
-        pubs: crate::supersede::publication_hosts(config.sources()),
+        pubs: crate::supersede::publication_hosts(config.sources(), learned),
     }
 }
 
@@ -312,7 +313,7 @@ fn ratio(num: u32, den: u32) -> f64 {
 
 /// The scan.
 fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let opts = post_id_options(ctx.config);
+    let opts = post_id_options(ctx.config, &crate::learned_hosts::rows(&ctx.state()));
     let exclude = ctx.config.exclude_folders();
     let pairs = PairTops::of(ctx.config);
     let files = ctx.index()?.query().file_paths()?;

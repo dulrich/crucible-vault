@@ -347,6 +347,7 @@ pub(super) enum Fill {
 /// frontmatter is left alone.
 pub(super) fn decide_publication(
     sources: &cv_actions::pipelines::SourcesConfig,
+    learned: &[cv_actions::sources::LearnedRow],
     doc: &FrontmatterDoc,
     tracked: Option<&str>,
 ) -> Option<(String, Fill)> {
@@ -368,7 +369,7 @@ pub(super) fn decide_publication(
     if !blank {
         return None;
     }
-    publication_for(sources, &clip, tracked).map(|p| (p, Fill::Backfill))
+    publication_for(sources, learned, &clip, tracked).map(|p| (p, Fill::Backfill))
 }
 
 /// Phase F.
@@ -388,6 +389,7 @@ pub(super) fn publication(
     }
     let cfg = ctx.config;
     let sources = cfg.sources();
+    let learned = crate::learned_hosts::rows(&ctx.state());
     // Round 11 E1: notes matching a work record join the candidates (each note once).
     let mut paths: BTreeSet<String> = by_note.keys().cloned().collect();
     paths.extend(source_candidates(ctx)?);
@@ -398,7 +400,8 @@ pub(super) fn publication(
         let doc = FrontmatterDoc::new(text.as_str());
         let rows = by_note.get(&path);
         let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
-        let Some((_, fill)) = decide_publication(sources, &doc, tracked.as_deref()) else {
+        let Some((_, fill)) = decide_publication(sources, &learned, &doc, tracked.as_deref())
+        else {
             if rows.is_some() && crate::supersede::publication_blank(&doc) {
                 c.publication_no_row += 1;
             }
@@ -411,7 +414,8 @@ pub(super) fn publication(
         let mut done = fill;
         match ctx.modify(&path, |old| {
             let d = FrontmatterDoc::new(old);
-            let Some((p, fill)) = decide_publication(sources, &d, tracked.as_deref()) else {
+            let Some((p, fill)) = decide_publication(sources, &learned, &d, tracked.as_deref())
+            else {
                 return Ok(None);
             };
             done = fill;

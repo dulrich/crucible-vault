@@ -188,6 +188,9 @@ pub enum SettingsMsg {
     CreateSourceFromNote,
     /// The `propose_source` answer (or the user-facing failure text).
     SourceProposed(Result<cv_protocol::ProposeSourceResult, String>),
+    /// The learned publication hosts `(host, publication)` for the Sources page (plan
+    /// intake-foundations WP-3), or the read failure.
+    LearnedHostsLoaded(Result<Vec<(String, String)>, String>),
 }
 
 #[cfg(test)]

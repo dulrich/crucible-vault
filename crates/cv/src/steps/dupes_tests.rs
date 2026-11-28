@@ -208,7 +208,7 @@ fn containment_pair_is_directional_and_idempotent() {
     assert_eq!(var(&again, "already_labelled"), 1);
     assert_eq!(env.labels("_blog_metadata/s.md"), ["[[daily/day/l]]"]);
 
-    let opts = post_id_options(&env.0.config);
+    let opts = post_id_options(&env.0.config, &[]);
     let s = score(&small, &large, &opts);
     assert!(!s.identity_match);
     assert!((s.containment_a_in_b - 1.0).abs() < 1e-9);

@@ -30,6 +30,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use chrono::NaiveDate;
 use cv_actions::pipelines::{Publication, SourcesConfig, SupersedeConfig};
+use cv_actions::sources::LearnedRow;
 use cv_ingest::access::Access;
 use cv_ingest::identity::{MatchKeys, row_keys, url_probe, value_keys};
 use cv_ingest::supersede::{Decision, PublicationHosts, Side, decide, overlap};
@@ -149,12 +150,13 @@ pub fn publication_host_list(p: &Publication) -> Vec<String> {
 }
 
 /// The host → record `name` map of every publication (plan sources-publication-model WP-3):
-/// the data behind the publication-scoped identity key. First record wins a shared host.
+/// the data behind the publication-scoped identity key. First record wins a shared host. Hosts
+/// are each record's effective hosts (configured, then learned: plan intake-foundations WP-3).
 #[must_use]
-pub fn publication_hosts(sources: &SourcesConfig) -> PublicationHosts {
+pub fn publication_hosts(sources: &SourcesConfig, learned: &[LearnedRow]) -> PublicationHosts {
     let mut m = PublicationHosts::default();
-    for p in sources.publications() {
-        for h in publication_host_list(p) {
+    for (p, hosts) in sources.effective_hosts(learned) {
+        for h in hosts {
             m.insert(&h, &p.name);
         }
     }
@@ -187,7 +189,10 @@ impl SupersedeIndex {
         let q = reader.query();
         let rows = |key: &str| Ok::<_, StepError>(q.md_props_with_key(key)?);
         let mut idx = Self {
-            pubs: publication_hosts(ctx.config.sources()),
+            pubs: publication_hosts(
+                ctx.config.sources(),
+                &crate::learned_hosts::rows(&ctx.state()),
+            ),
             ..Self::default()
         };
         for r in rows("source")? {
@@ -578,7 +583,10 @@ fn save_old_with(s: &StateProbe<'_>, path: &str, text: &str) -> std::io::Result<
 /// Writes the resolved evidence to the resolved note's tracker rows (by `note_path`, else by
 /// URL), then ticks them only when the resolved body is complete (audit M2).
 fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Result<(), StepError> {
-    let pubs = publication_hosts(ctx.config.sources());
+    let pubs = publication_hosts(
+        ctx.config.sources(),
+        &crate::learned_hosts::rows(&ctx.state()),
+    );
     let mut db = ctx.state();
     let mut rows = db.tracker_items_for_note(path)?;
     if rows.is_empty() {

@@ -38,6 +38,17 @@ impl RunRequest {
 }
 
 impl Runner {
+    /// Applies the learned-host ownership rule to a reloaded `sources.toml` (plan
+    /// `intake-foundations` WP-3): drops learned rows whose host a configured matcher now
+    /// reserves, or whose publication no longer exists.
+    pub(super) fn prune_learned_hosts(&self) {
+        let cfg = self.config();
+        let n = crate::learned_hosts::prune(&mut lock(&self.inner.state), cfg.sources());
+        if n > 0 {
+            tracing::info!(dropped = n, "sources changed; learned hosts pruned");
+        }
+    }
+
     /// Enqueues the sources-only re-match; skipped (one `debug` line) when the config has no
     /// armed such action. A duplicate of a queued or running run is coalesced.
     pub(super) fn enqueue_sources_rematch(&self) {

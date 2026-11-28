@@ -356,6 +356,43 @@ pub(crate) fn raw_markdown(post: &MailPost) -> String {
     }
 }
 
+/// The mail proof of a learned host (plan `intake-foundations` WP-3): a message from a sender the
+/// record matches by `from`/`list_id` whose canonical post URL was not rebased (the record has no
+/// feed to rebase onto) proves that URL's host for the record, under the ownership rule. Seen
+/// and new messages alike.
+fn observe_mail_host(
+    ctx: &StepCtx<'_>,
+    sources: &SourcesConfig,
+    post: &MailPost,
+    nl: Option<&Publication>,
+) {
+    let Some(n) = nl else { return };
+    let list = post
+        .list_id
+        .as_deref()
+        .map(cv_text::mail_match::normalize_list_id);
+    let matched =
+        cv_text::mail_match::mail_matches(&post.from_addr, list.as_deref(), &n.from, &n.list_id);
+    if !matched || mail_blog_link(post, n).is_some() {
+        return;
+    }
+    let pub_hosts = supersede::publication_host_list(n);
+    let Some(host) = mail::canonical_post_url_in(post, None, &pub_hosts)
+        .as_deref()
+        .and_then(cv_text::url_canon::canonical_bare_host)
+    else {
+        return;
+    };
+    crate::learned_hosts::observe(
+        &mut ctx.state(),
+        sources,
+        &n.name,
+        &host,
+        crate::learned_hosts::EVIDENCE_MAIL,
+        crate::now_ms(),
+    );
+}
+
 /// Records and (maybe) captures one parsed message. The caller holds `intake::identity`.
 fn handle(
     ctx: &mut StepCtx<'_>,
@@ -365,6 +402,7 @@ fn handle(
 ) -> Result<Handled, StepError> {
     let nl = resolve_newsletter(post, run.sources);
     let key = nl.map_or(UNKNOWN, |n| n.name.as_str()).to_owned();
+    observe_mail_host(ctx, run.sources, post, nl);
     for k in [key.as_str(), UNKNOWN] {
         if ctx
             .state()

@@ -417,13 +417,13 @@ fn machine_folder_copy_is_skipped_and_nothing_is_trashed() {
 fn host_row_matches_blog_and_newsletter() {
     let c = config_of(&[("sources.toml", SOURCES)]);
     let s = c.sources();
-    let r = host_row("letter.example", s).unwrap();
+    let r = host_row("letter.example", s, &[]).unwrap();
     assert_eq!(r.kind.as_deref(), Some("news"));
     assert_eq!(
-        host_row("paid.example", s).unwrap().markers,
+        host_row("paid.example", s, &[]).unwrap().markers,
         ["Subscribe to keep reading"]
     );
-    assert!(host_row("nope.example", s).is_none());
+    assert!(host_row("nope.example", s, &[]).is_none());
 }
 
 #[test]
@@ -965,8 +965,8 @@ fn every_site(sources: &str, fm: &str, tracked: Option<&str>) -> [Option<String>
             .map(|p| p.publication().to_owned()),
         record_kind(&s, &clip, |k| k == "post" || k == "fanfic")
             .map(|(_, p)| p.publication().to_owned()),
-        decide_publication(&s, &d, tracked).map(|(p, _)| p),
-        publication_for(&s, &clip, tracked),
+        decide_publication(&s, &[], &d, tracked).map(|(p, _)| p),
+        publication_for(&s, &[], &clip, tracked),
     ]
 }
 
@@ -994,7 +994,7 @@ fn listed_host_record_wins_over_a_later_feed_on_that_host_at_every_site() {
     let fm = "source: https://x.example/p/1\n";
     assert_eq!(every_site(s, fm, None), all("Listed"));
     assert_eq!(
-        host_row("x.example", &config_sources(s)).and_then(|r| r.publication),
+        host_row("x.example", &config_sources(s), &[]).and_then(|r| r.publication),
         Some("Listed".to_owned())
     );
 }

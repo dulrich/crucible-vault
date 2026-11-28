@@ -391,6 +391,7 @@ impl Runner {
     pub fn reload_config_observed(&self) -> Vec<String> {
         let (errors, sources_changed) = self.reload();
         if sources_changed {
+            self.prune_learned_hosts();
             self.enqueue_sources_rematch();
         }
         errors

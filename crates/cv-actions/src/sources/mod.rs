@@ -419,6 +419,161 @@ impl SourcesConfig {
             .iter()
             .find(|p| p.channel_id.as_deref().map(str::trim) == Some(id))
     }
+
+    /// Whether `host` (any form, `www.` ignored) appears in a configured matcher of any record:
+    /// a feed's host, a `hosts` entry or the host of a `prefix` (plan `intake-foundations` WP-3).
+    /// A reserved host is never learned by any record. Reservation is not a match: it changes no
+    /// resolution.
+    #[must_use]
+    pub fn is_reserved_host(&self, host: &str) -> bool {
+        let forms: Vec<String> = [bare_host(host), configured_host(host)]
+            .into_iter()
+            .flatten()
+            .collect();
+        if forms.is_empty() {
+            return true;
+        }
+        self.folded.iter().any(|p| {
+            p.feeds
+                .iter()
+                .chain(p.prefix.iter())
+                .filter_map(|u| nonblank(u))
+                .flat_map(|u| [feed_host(u), canonical_bare_host(u)])
+                .chain(
+                    p.hosts
+                        .iter()
+                        .filter_map(|h| nonblank(h))
+                        .flat_map(|h| [bare_host(h), configured_host(h)]),
+                )
+                .flatten()
+                .any(|h| forms.contains(&h))
+        })
+    }
+
+    /// The ownership rule for learning, written once (plan `intake-foundations` WP-3): record
+    /// `name` may learn `host` when the record exists and the host is not reserved
+    /// ([`Self::is_reserved_host`]). That the first publication to prove a host keeps it is the
+    /// store's rule (one row per host); [`Self::effective_learned`] applies this rule on read and
+    /// a reload drops the rows it now rejects.
+    #[must_use]
+    pub fn may_learn(&self, host: &str, name: &str) -> bool {
+        self.folded.iter().any(|p| p.name == name) && !self.is_reserved_host(host)
+    }
+
+    /// The learned rows that still hold under [`Self::may_learn`], host in comparison form, in
+    /// the given order (the first row for a host wins).
+    #[must_use]
+    pub fn effective_learned<'a>(
+        &'a self,
+        learned: &[LearnedRow],
+    ) -> Vec<(String, &'a Publication)> {
+        let mut out: Vec<(String, &Publication)> = Vec::new();
+        for r in learned {
+            let Some(h) = bare_host(&r.host) else {
+                continue;
+            };
+            if out.iter().any(|(o, _)| *o == h) || !self.may_learn(&h, &r.publication) {
+                continue;
+            }
+            if let Some(p) = self.folded.iter().find(|p| p.name == r.publication) {
+                out.push((h, p));
+            }
+        }
+        out
+    }
+
+    /// A publication's effective hosts, the one place they are computed (plan
+    /// `intake-foundations` WP-3): every record (config order) with its configured hosts
+    /// ([`Publication::hosts`], as written) then its learned hosts that hold under
+    /// [`Self::may_learn`]. The match keys (`publication_hosts` in the `cv` binary) and
+    /// [`Self::resolve_learned`] both read it.
+    #[must_use]
+    pub fn effective_hosts<'a>(
+        &'a self,
+        learned: &[LearnedRow],
+    ) -> Vec<(&'a Publication, Vec<String>)> {
+        let learned = self.effective_learned(learned);
+        self.folded
+            .iter()
+            .map(|p| {
+                let mut hosts: Vec<String> = p.hosts().map(|(h, _)| h).collect();
+                hosts.extend(
+                    learned
+                        .iter()
+                        .filter(|(_, q)| std::ptr::eq(*q, p))
+                        .map(|(h, _)| h.clone()),
+                );
+                (p, hosts)
+            })
+            .collect()
+    }
+
+    /// The host step over learned hosts alone: the record that learned `host` (comparison form),
+    /// contained under its first feed.
+    #[must_use]
+    pub fn by_learned_host(&self, host: &str, learned: &[LearnedRow]) -> Option<PubMatch<'_>> {
+        let want = bare_host(host)?;
+        self.effective_learned(learned)
+            .into_iter()
+            .find(|(h, _)| *h == want)
+            .map(|(_, p)| PubMatch::Host {
+                publication: p,
+                feed: p.feeds.first().map(|f| f.trim()),
+            })
+    }
+
+    /// [`Self::by_host`], else [`Self::by_learned_host`].
+    #[must_use]
+    pub fn by_host_learned(&self, host: &str, learned: &[LearnedRow]) -> Option<PubMatch<'_>> {
+        self.by_host(host)
+            .or_else(|| self.by_learned_host(host, learned))
+    }
+
+    /// [`Self::resolve`], else the source's learned host: a learned host never changes which
+    /// record a configured matcher selects (D36 precedence unchanged), and an empty `learned` is
+    /// exactly [`Self::resolve`].
+    #[must_use]
+    pub fn resolve_learned(
+        &self,
+        authors: &[&str],
+        source: &str,
+        learned: &[LearnedRow],
+    ) -> Option<PubMatch<'_>> {
+        self.resolve(authors, source).or_else(|| {
+            canonical_bare_host(source.trim()).and_then(|h| self.by_learned_host(&h, learned))
+        })
+    }
+}
+
+/// One learned host as plain data (the `cv` binary reads it from `state.db`): `host` owned by
+/// the record named `publication`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedRow {
+    /// The host (any case, `www.` ignored).
+    pub host: String,
+    /// The record `name` that proved it.
+    pub publication: String,
+}
+
+/// The host a feed item's link proves for the feed's publication (plan `intake-foundations`
+/// WP-3, deferred audit item E1): `Some` only when `url` is http(s), is provably the item's link
+/// and not its GUID — it differs from `item_id` as written and canonically (the blog tracker's
+/// `url` is `link || guid` and its `item_id` is `guid`, else the canonical link, so a row with
+/// no link has `url == item_id`) — and its canonical host differs from the feed's. The ownership
+/// rule ([`SourcesConfig::may_learn`]) is the caller's next check.
+#[must_use]
+pub fn feed_link_host(url: &str, item_id: &str, feed: &str) -> Option<String> {
+    let (url, id) = (url.trim(), item_id.trim());
+    http_host(url)?;
+    if url == id {
+        return None;
+    }
+    let canon = |s: &str| cv_text::url_canon::canonicalize_url(s).map(|c| c.canonical);
+    if canon(url).is_some_and(|c| Some(c) == canon(id)) {
+        return None;
+    }
+    let host = canonical_bare_host(url)?;
+    (canonical_bare_host(feed.trim()).as_deref() != Some(host.as_str())).then_some(host)
 }
 
 #[cfg(test)]
@@ -654,6 +809,128 @@ mod tests {
             })
         ));
         assert!(c.by_host("none.example").is_none());
+    }
+
+    fn lr(host: &str, publication: &str) -> LearnedRow {
+        LearnedRow {
+            host: host.into(),
+            publication: publication.into(),
+        }
+    }
+
+    /// Plan intake-foundations WP-3: an empty learned table changes no resolution.
+    #[test]
+    fn empty_learned_table_changes_no_resolution() {
+        let c = parse(
+            "[[publication]]\nname = \"ByAuthor\"\nauthor = \"Ann\"\n[[publication]]\nname = \"ByPrefix\"\nprefix = [\"https://s.example/s/\"]\n[[publication]]\nname = \"ByHost\"\nfeeds = [\"https://h.example/feed\"]\nhosts = [\"s.example\"]\n",
+        )
+        .unwrap();
+        for (a, s) in [
+            (&["Ann"][..], "https://s.example/s/1"),
+            (&[][..], "https://h.example/p/1"),
+            (&["Ann"][..], "https://other.example/"),
+            (&["Bob"][..], "https://none.example/"),
+        ] {
+            assert_eq!(c.resolve_learned(a, s, &[]), c.resolve(a, s));
+        }
+        for (p, hosts) in c.effective_hosts(&[]) {
+            assert_eq!(hosts, p.hosts().map(|(h, _)| h).collect::<Vec<_>>());
+        }
+        assert!(c.by_host_learned("none.example", &[]).is_none());
+    }
+
+    /// A learned host resolves only where no configured matcher does; a host configured on B is
+    /// never learned for A; an unknown record learns nothing.
+    #[test]
+    fn learned_hosts_follow_the_ownership_rule() {
+        let c = parse(
+            "[[publication]]\nname = \"A\"\nfrom = [\"@a.example\"]\nfeeds = [\"https://a.example/feed\"]\n[[publication]]\nname = \"B\"\nhosts = [\"b.example\"]\n[[publication]]\nname = \"Ann\"\nauthor = \"Ann\"\n",
+        )
+        .unwrap();
+        assert!(c.may_learn("a.substack.com", "A"));
+        assert!(!c.may_learn("www.b.example", "A"));
+        assert!(!c.may_learn("a.example", "A"));
+        assert!(!c.may_learn("a.substack.com", "Gone"));
+        let learned = [lr("b.example", "A"), lr("a.substack.com", "A")];
+        let eff = c.effective_learned(&learned);
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].0, "a.substack.com");
+        let name = |m: Option<PubMatch<'_>>| m.map(|m| m.publication().name.clone());
+        assert_eq!(
+            name(c.resolve_learned(&[], "https://a.substack.com/p/x", &learned)).as_deref(),
+            Some("A")
+        );
+        // B keeps its configured host.
+        assert_eq!(
+            name(c.resolve_learned(&[], "https://b.example/p/x", &learned)).as_deref(),
+            Some("B")
+        );
+        // A configured author match is never overridden by a learned host.
+        assert_eq!(
+            name(c.resolve_learned(&["Ann"], "https://a.substack.com/p/x", &learned)).as_deref(),
+            Some("Ann")
+        );
+        // The first row for a host wins.
+        let eff = c.effective_learned(&[lr("x.example", "A"), lr("x.example", "B")]);
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].1.name, "A");
+        let hosts: Vec<Vec<String>> = c
+            .effective_hosts(&learned)
+            .into_iter()
+            .map(|(_, h)| h)
+            .collect();
+        assert_eq!(hosts[0], ["a.example", "a.substack.com"]);
+        assert_eq!(hosts[1], ["b.example"]);
+    }
+
+    /// Two records sharing a platform host through disjoint prefixes resolve as before, and the
+    /// host is reserved against learning.
+    #[test]
+    fn shared_prefix_host_is_reserved_and_resolves_as_today() {
+        let c = parse(
+            "[[publication]]\nname = \"P\"\nprefix = [\"https://plat.example/u/p/\"]\n[[publication]]\nname = \"Q\"\nprefix = [\"https://plat.example/u/q/\"]\n",
+        )
+        .unwrap();
+        assert!(c.is_reserved_host("plat.example"));
+        assert!(c.is_reserved_host("www.plat.example"));
+        assert!(!c.may_learn("plat.example", "P") && !c.may_learn("plat.example", "Q"));
+        let learned = [lr("plat.example", "P")];
+        for (src, want) in [
+            ("https://plat.example/u/p/1", Some("P")),
+            ("https://plat.example/u/q/1", Some("Q")),
+            ("https://plat.example/u/r/1", None),
+        ] {
+            let got = c.resolve_learned(&[], src, &learned);
+            assert_eq!(got, c.resolve(&[], src));
+            assert_eq!(got.map(|m| m.publication().name.as_str()), want);
+        }
+    }
+
+    /// Deferred audit item E1: only a link that is provably not the GUID proves a host.
+    #[test]
+    fn feed_link_host_needs_a_link_that_is_not_the_guid() {
+        let feed = "https://feeds.example/p/rss";
+        assert_eq!(
+            feed_link_host("https://blog.example/p/1", "guid-1", feed).as_deref(),
+            Some("blog.example")
+        );
+        // GUID-as-URL on a foreign host (no link): url == item_id.
+        assert_eq!(
+            feed_link_host("https://guid.example/x/1", "https://guid.example/x/1", feed),
+            None
+        );
+        // Canonically equal (tracking param, trailing slash).
+        assert_eq!(
+            feed_link_host(
+                "https://blog.example/p/1/?utm_source=x",
+                "https://blog.example/p/1",
+                feed
+            ),
+            None
+        );
+        // Same host as the feed, and not http(s).
+        assert_eq!(feed_link_host("https://feeds.example/p/1", "g", feed), None);
+        assert_eq!(feed_link_host("tag:blog.example,1", "g", feed), None);
     }
 
     #[test]

@@ -48,7 +48,7 @@
 //! absent, before the child is spawned.
 
 use cv_actions::pipelines::{Publication, SourcesConfig};
-use cv_actions::sources::PubMatch;
+use cv_actions::sources::{LearnedRow, PubMatch};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
@@ -127,16 +127,17 @@ pub(in crate::steps) fn clip_of(doc: &FrontmatterDoc) -> Clip {
     }
 }
 
-/// The publication of a note with clip facts `clip`: [`SourcesConfig::resolve`]'s record, else
+/// The publication of a note with clip facts `clip`: [`SourcesConfig::resolve_learned`]'s record, else
 /// the tracker-row publication `tracked`.
 pub(in crate::steps) fn publication_for(
     sources: &SourcesConfig,
+    learned: &[LearnedRow],
     clip: &Clip,
     tracked: Option<&str>,
 ) -> Option<String> {
     let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
     sources
-        .resolve(&authors, &clip.source)
+        .resolve_learned(&authors, &clip.source, learned)
         .map(|m| m.publication().publication().to_owned())
         .or_else(|| tracked.map(str::to_owned))
 }
@@ -155,13 +156,17 @@ pub(in crate::steps) struct HostRow {
     pub(in crate::steps) publication: Option<String>,
 }
 
-/// The record [`SourcesConfig::by_host`] matches for the clip host, as a [`HostRow`] (plan
+/// The record [`SourcesConfig::by_host_learned`] matches for the clip host, as a [`HostRow`] (plan
 /// sources-publication-model WP-2).
-pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<HostRow> {
+pub(in crate::steps) fn host_row(
+    host: &str,
+    sources: &SourcesConfig,
+    learned: &[LearnedRow],
+) -> Option<HostRow> {
     let PubMatch::Host {
         publication: p,
         feed,
-    } = sources.by_host(host)?
+    } = sources.by_host_learned(host, learned)?
     else {
         return None;
     };
@@ -331,7 +336,11 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let body = doc.body().to_owned();
 
     let sources = ctx.config.sources().clone();
-    let row = clip.host.as_deref().and_then(|h| host_row(h, &sources));
+    let learned = crate::learned_hosts::rows(&ctx.state());
+    let row = clip
+        .host
+        .as_deref()
+        .and_then(|h| host_row(h, &sources, &learned));
 
     // ---- dedup --------------------------------------------------------------------------------
     let words = body.split_whitespace().count();

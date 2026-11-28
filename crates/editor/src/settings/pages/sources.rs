@@ -47,6 +47,9 @@ pub struct SourcesState {
     /// The last "Create Source from note" answer's notes and offer (plan
     /// sources-publication-model WP-7).
     pub from_note: Option<super::sources_propose::FromNote>,
+    /// The learned publication hosts `(host, publication)`, listed read-only (plan
+    /// intake-foundations WP-3).
+    pub learned: Vec<(String, String)>,
 }
 
 /// Sources page messages (wrapped in [`SettingsMsg::Sources`]).
@@ -426,6 +429,42 @@ fn badge<'a>(label: &'static str, t: theme::Tokens) -> Element<'a, Message> {
     text(label).size(11).color(t.text_faint.to_color()).into()
 }
 
+/// The learned hosts `(host, publication)` grouped per publication (publications and hosts
+/// sorted), for the read-only list (plan intake-foundations WP-3).
+#[must_use]
+pub fn learned_by_publication(rows: &[(String, String)]) -> Vec<(String, Vec<String>)> {
+    let mut m: std::collections::BTreeMap<&str, Vec<String>> = std::collections::BTreeMap::new();
+    for (host, publication) in rows {
+        m.entry(publication.as_str())
+            .or_default()
+            .push(host.clone());
+    }
+    m.into_iter()
+        .map(|(p, mut hosts)| {
+            hosts.sort();
+            hosts.dedup();
+            (p.to_owned(), hosts)
+        })
+        .collect()
+}
+
+/// The read-only "Learned hosts" list: one line per publication, no edit or delete control.
+fn learned_view<'a>(rows: &[(String, String)], t: theme::Tokens) -> Element<'a, Message> {
+    let groups = learned_by_publication(rows);
+    if groups.is_empty() {
+        return Space::new().into();
+    }
+    let mut col = column![theme::control_label("Learned hosts".to_owned(), 14.0)].spacing(4);
+    for (p, hosts) in groups {
+        col = col.push(
+            text(format!("{p}: {}", hosts.join(", ")))
+                .size(12)
+                .color(t.text_faint.to_color()),
+        );
+    }
+    col.into()
+}
+
 fn overview_view<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Element<'a, Message> {
     let t = cx.t;
     let (Some(doc), Some(schema)) = (f.doc(), f.schema()) else {
@@ -495,6 +534,7 @@ fn overview_view<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Element<'a, Message> 
             }
         }
     }
+    col = col.push(learned_view(&cx.s.sources.learned, t));
     let len = doc.len(&Path::root().key("publication"));
     col = col.push(text_button(
         "Add publication",

@@ -8,6 +8,7 @@ pub mod config;
 pub mod daemon;
 pub mod intake_pending;
 pub mod jobs;
+pub mod learned_hosts;
 pub mod lookup;
 pub mod media_audit;
 pub mod note_id;

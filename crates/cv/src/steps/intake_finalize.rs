@@ -117,7 +117,10 @@ fn resolve_rows(
     post_ids: &[String],
     video: Option<&str>,
 ) -> Result<Vec<TrackerItem>, StepError> {
-    let pubs = crate::supersede::publication_hosts(ctx.config.sources());
+    let pubs = crate::supersede::publication_hosts(
+        ctx.config.sources(),
+        &crate::learned_hosts::rows(&ctx.state()),
+    );
     let keys = note_keys(
         &NoteFacts {
             sources,

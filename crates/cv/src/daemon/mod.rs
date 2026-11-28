@@ -285,6 +285,12 @@ impl Daemon {
             data_home: shared.config.data_home.clone(),
         });
         runner.reload_config();
+        // Plan intake-foundations WP-3: learned publication hosts from recorded blog rows (local
+        // database only, idempotent).
+        let seeded = crate::learned_hosts::seed(&shared.state, runner.config().sources(), now_ms());
+        if seeded > 0 {
+            tracing::info!(seeded, "learned publication hosts seeded");
+        }
         if shared.runner.set(runner.clone()).is_err() {
             bail!("runner already started");
         }

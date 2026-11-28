@@ -105,7 +105,12 @@ fn publication_for(
     rows: Option<&Vec<TrackerItem>>,
 ) -> Option<String> {
     let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
-    auto_file::publication_for(ctx.config.sources(), &clip_of(doc), tracked.as_deref())
+    auto_file::publication_for(
+        ctx.config.sources(),
+        &crate::learned_hosts::rows(&ctx.state()),
+        &clip_of(doc),
+        tracked.as_deref(),
+    )
 }
 
 /// The candidate paths: day-folder notes with `post-id` or `message-id`.

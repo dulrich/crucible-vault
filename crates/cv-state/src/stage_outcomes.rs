@@ -171,6 +171,17 @@ impl StateDb {
             .execute("DELETE FROM learned_hosts WHERE host = ?1", [host])?
             == 1)
     }
+
+    /// Every `(source_key, item_id, url)` of `source_kind`'s tracker rows, ordered by source key
+    /// and item id (plan `intake-foundations` WP-3: the learned-host seed reads them).
+    pub fn tracker_url_rows(&self, source_kind: &str) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT source_key, item_id, url FROM tracker_items WHERE source_kind = ?1
+             ORDER BY source_key, item_id",
+        )?;
+        let rows = stmt.query_map([source_kind], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
 impl StateReader {
