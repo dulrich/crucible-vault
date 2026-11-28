@@ -9,8 +9,10 @@
 //!
 //! **Population.** The intake classifier of `steps::intake_kind`: `post-id` → blog, `message-id`
 //! → mail, a YouTube `source` → youtube, any other `source` → clip; markdown notes outside
-//! `.trash/`, the index's skipped dirs and `_`/`.`-prefixed top folders, whose index `ctime`
-//! (creation time, falling back to mtime) is inside the window.
+//! `.trash/`, the index's skipped dirs and `_`/`.`-prefixed top folders, whose creation
+//! date is inside the window: the frontmatter `created` date (`YYYY-MM-DD` as UTC midnight, or an
+//! ISO date-time), else the index `ctime` (a bulk rewrite resets `ctime`, so it is the fallback).
+//! The first output line names the vault root read.
 //!
 //! **Facts**, per note: remote image embeds (`cv media audit`'s count), the `_MD5` image embeds
 //! and their `image_descriptions` records (a `failed` record is attempted), the `yt-metadata`,
@@ -55,6 +57,80 @@ pub const DEFAULT_DAYS: u32 = 30;
 const CLIP_INBOX: &str = "Clippings";
 
 const DAY_MS: i64 = 86_400_000;
+
+/// The frontmatter key holding a note's creation date (the `lint` step's `created_key` default).
+const CREATED_KEY: &str = "created";
+
+/// A creation date as epoch milliseconds: `YYYY-MM-DD` (UTC midnight) optionally followed by
+/// `T`/space and `HH:MM[:SS[.fff]]` and `Z` or `±HH[:MM]` (no offset is UTC). `None` for anything
+/// else (the caller falls back to the index `ctime`).
+fn parse_created_ms(v: &str) -> Option<i64> {
+    let v = v.trim().trim_matches(['"', '\'']);
+    let num = |s: &str, n: usize| -> Option<i64> {
+        (s.len() == n && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    let date = v.get(..10)?;
+    let (y, m, d) = (
+        num(&date[..4], 4)?,
+        num(&date[5..7], 2)?,
+        num(&date[8..], 2)?,
+    );
+    if date.as_bytes()[4] != b'-'
+        || date.as_bytes()[7] != b'-'
+        || !(1..=12).contains(&m)
+        || !(1..=31).contains(&d)
+    {
+        return None;
+    }
+    let mut ms = cv_text::days_from_civil(y, m, d) * DAY_MS;
+    let rest = &v[10..];
+    if rest.is_empty() {
+        return Some(ms);
+    }
+    let rest = rest.strip_prefix(['T', ' '])?;
+    let t = rest.get(..5)?;
+    let (hh, mm) = (num(&t[..2], 2)?, num(&t[3..], 2)?);
+    if t.as_bytes()[2] != b':' || hh > 23 || mm > 59 {
+        return None;
+    }
+    ms += (hh * 60 + mm) * 60_000;
+    let mut tail = &rest[5..];
+    if let Some(sec) = tail.strip_prefix(':') {
+        let s = num(sec.get(..2)?, 2)?;
+        if s > 60 {
+            return None;
+        }
+        ms += s * 1000;
+        tail = &sec[2..];
+        if let Some(frac) = tail.strip_prefix('.') {
+            let digits = frac.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            tail = &frac[digits..];
+        }
+    }
+    match tail {
+        "" | "Z" | "z" => Some(ms),
+        _ => {
+            let sign = match tail.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let off = &tail[1..];
+            let (oh, om) = match off.len() {
+                2 => (num(off, 2)?, 0),
+                4 => (num(&off[..2], 2)?, num(&off[2..], 2)?),
+                5 if off.as_bytes()[2] == b':' => (num(&off[..2], 2)?, num(&off[3..], 2)?),
+                _ => return None,
+            };
+            Some(ms - sign * (oh * 60 + om) * 60_000)
+        }
+    }
+}
 
 /// Where the report reads from.
 #[derive(Debug, Clone)]
@@ -226,7 +302,11 @@ pub fn report(src: &Sources, now_ms: i64, days: u32, verbose: bool) -> Result<St
     let mut lines = Vec::new();
     for path in paths.iter().filter(|p| in_scope(p)) {
         let Some(file) = q.file(path)? else { continue };
-        if file.ctime < since {
+        let props = q.props(path)?;
+        let created = text_prop(&props, CREATED_KEY)
+            .and_then(|v| parse_created_ms(&v))
+            .unwrap_or(file.ctime);
+        if created < since {
             continue;
         }
         let Some(bytes) = read(path).with_context(|| format!("reading {path}"))? else {
@@ -239,7 +319,6 @@ pub fn report(src: &Sources, now_ms: i64, days: u32, verbose: bool) -> Result<St
             mail.contains(path),
             &src_url,
         ));
-        let props = q.props(path)?;
         let facts = facts(&FactInput {
             path,
             kind,
@@ -275,7 +354,9 @@ pub fn report(src: &Sources, now_ms: i64, days: u32, verbose: bool) -> Result<St
             }
         }
     }
-    Ok(render(notes, days, &by_kind, &counts, &lines))
+    let mut out = format!("vault: {}\n", src.vault.display());
+    out.push_str(&render(notes, days, &by_kind, &counts, &lines));
+    Ok(out)
 }
 
 struct FactInput<'a> {

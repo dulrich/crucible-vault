@@ -86,7 +86,7 @@ fn report_with_and_without_the_outcome_table_and_leaves_bytes_unchanged() {
     let text = report(&src, now, 30, true).unwrap();
     assert!(!src.state_db.exists() && !src.search_db.exists());
     assert!(
-        text.starts_with("intake notes (last 30 days): 3 blog=1 mail=1 youtube=0 clip=1\n"),
+        text.contains("\nintake notes (last 30 days): 3 blog=1 mail=1 youtube=0 clip=1\n"),
         "{text}"
     );
     //                         done pending skipped unfinished failed stuck
@@ -143,7 +143,43 @@ fn report_with_and_without_the_outcome_table_and_leaves_bytes_unchanged() {
     // The window: a clock 31 days on sees nothing.
     let later = report(&src, now + 31 * DAY_MS, 30, false).unwrap();
     assert!(
-        later.starts_with("intake notes (last 30 days): 0 "),
+        later.contains("\nintake notes (last 30 days): 0 "),
         "{later}"
     );
+    assert!(later.starts_with(&format!("vault: {}\n", src.vault.display())));
+}
+
+#[test]
+fn window_uses_the_created_date_and_falls_back_to_ctime() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = vault(dir.path());
+    let w = |p: &str, s: &str| std::fs::write(src.vault.join(p), s).unwrap();
+    w(
+        "Blog/old.md",
+        "---\npost-id: https://b.example/old\ncreated: 2020-01-02\n---\nx\n",
+    );
+    w(
+        "Blog/new.md",
+        "---\npost-id: https://b.example/new\ncreated: 2026-11-26T08:00:00Z\n---\nx\n",
+    );
+    w(
+        "Blog/junk.md",
+        "---\npost-id: https://b.example/junk\ncreated: not a date\n---\nx\n",
+    );
+    drop(cv_index::Index::create(&src.vault, &src.index_db).unwrap());
+    let now = crate::now_ms() + 1000;
+    let text = report(&src, now, 30, true).unwrap();
+    // old: written just now but created in 2020 -> out; new and junk (ctime fallback) -> in.
+    assert!(text.contains("blog=3 "), "{text}");
+    assert!(
+        text.contains("Blog/new.md") && text.contains("Blog/junk.md"),
+        "{text}"
+    );
+    assert!(!text.contains("Blog/old.md"), "{text}");
+    assert_eq!(parse_created_ms("2026-11-01"), Some(20_758 * DAY_MS));
+    assert_eq!(
+        parse_created_ms("2026-11-01T01:00:00+01:00"),
+        Some(20_758 * DAY_MS)
+    );
+    assert_eq!(parse_created_ms("2026-13-01"), None);
 }
