@@ -963,7 +963,7 @@ fn every_site(sources: &str, fm: &str, tracked: Option<&str>) -> [Option<String>
     [
         s.by_note(&authors, &clip.source)
             .map(|p| p.publication().to_owned()),
-        record_kind(&s, &clip, |k| k == "post" || k == "fanfic")
+        record_kind(&s, &clip, |k| k == "post" || k == "fanfic", false)
             .map(|(_, p)| p.publication().to_owned()),
         decide_publication(&s, &[], &d, tracked).map(|(p, _)| p),
         publication_for(&s, &[], &clip, tracked),

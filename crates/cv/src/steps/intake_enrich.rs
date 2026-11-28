@@ -318,6 +318,8 @@ pub(crate) fn run_note(
     let words = body.split_whitespace().count();
 
     let answer = agent::complete(ctx, mgr, &agent::var_params(&p.agent), None)?;
+    // A provider answer: a real attempt (plan intake-stage-jobs WP-3, the breaker credit).
+    out.attempted = true;
     let model_ref = answer.model_ref();
     let parsed = enrich::parse(&answer.text).map_err(|e| {
         StepError::failed(format!(

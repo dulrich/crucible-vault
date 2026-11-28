@@ -265,6 +265,8 @@ pub(super) fn execute_steps(
                 }
             }
             Err(StepError::Failed { message, reason }) => {
+                summary.stage_recorded =
+                    crate::steps::stage_record::body_stage(action, step).is_some();
                 return (
                     JobResult::Failed {
                         error: format!("step {} ({}): {message}", i + 1, step.kind().as_str()),

@@ -815,3 +815,53 @@ fn vault_backfill_scope_and_selection() {
     assert!(env.text(".trash/y.md").contains("127.0.0.1"));
     assert!(env.text("daily/n.md").contains("_MD5."));
 }
+
+/// Plan intake-stage-jobs WP-3: as the `localize` stage body, a connection failure defers under
+/// the download key (an outage: no outcome row, never counted toward the cap); the same step
+/// under an unmarked action keeps the fold-and-return Ok. A refused download is no attempt.
+#[test]
+fn stage_body_defers_on_a_connection_failure_and_other_runs_fold() {
+    let dead = DeadPort::new();
+    let port = dead.port();
+    let note =
+        format!("---\nsource: https://example.com/p\n---\n![](http://127.0.0.1:{port}/a.png)\n");
+    let (plain, staged, rows) = with_server(HashMap::new(), None, move |_, _| {
+        let mut env = env(&[("Clips/n.md", note.as_bytes())]);
+        let id = env
+            .state
+            .lock()
+            .unwrap()
+            .note_id_bind("Clips/n.md")
+            .unwrap();
+        let step = env.step("timeout_secs = 5");
+        let plain = env.run(&step, "Clips/n.md");
+        env.0.action.stage = Some("localize".into());
+        let staged = env.run(&step, "Clips/n.md");
+        let id = i64::try_from(id.0).unwrap();
+        let rows = env.state.lock().unwrap().stage_outcomes(id).unwrap();
+        (plain, staged, rows)
+    });
+    let plain = plain.unwrap();
+    assert!(!plain.attempted, "a refused connection is no attempt");
+    match staged {
+        Err(StepError::Deferred { service, cause, .. }) => {
+            assert_eq!(service.as_deref(), Some(localize::SERVICE));
+            assert!(matches!(cause, DeferCause::Transient(_)));
+        }
+        other => panic!("expected a deferral, got {other:?}"),
+    }
+    assert!(rows.is_empty(), "an outage records nothing");
+}
+
+/// Plan intake-stage-jobs WP-3 (pin 6): a download that got a response is a real attempt.
+#[test]
+fn a_real_download_sets_attempted() {
+    let routes = HashMap::from([route("/a.png", "image/png", png(3))]);
+    let out = with_server(routes, None, move |port, _| {
+        let note = format!("![](http://127.0.0.1:{port}/a.png)\n");
+        let env = env(&[("n.md", note.as_bytes())]);
+        let step = env.step("");
+        env.run(&step, "n.md").unwrap()
+    });
+    assert!(out.attempted);
+}

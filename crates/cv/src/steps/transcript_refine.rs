@@ -215,6 +215,7 @@ pub(crate) fn run_note(
     let mut out = StepOutcome::default();
     out.push_output(path);
     out.push_output(raw_path);
+    out.attempted = true;
     out.set_vars(&Vars {
         skipped: None,
         words_in,

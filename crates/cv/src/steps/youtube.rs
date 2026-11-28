@@ -147,6 +147,7 @@ fn channel_folder(ctx: &StepCtx<'_>, channel_id: &str, title: &str) -> String {
 fn ensure_metadata_note(
     ctx: &mut StepCtx<'_>,
     id: &str,
+    called: &std::cell::Cell<bool>,
 ) -> Result<Ensured<Option<String>>, StepError> {
     if let Some((path, tombstone)) = find_metadata_note(ctx, id)? {
         return Ok(Ensured {
@@ -162,10 +163,12 @@ fn ensure_metadata_note(
     let r = block_on(youtube().videos(c, &key, &[id]))?;
     let video = match r {
         Ok(items) => {
+            called.set(true);
             record_usage(ctx, api::SERVICE, 1);
             items.into_iter().next()
         }
         Err(FetchError::NotFound { .. }) => {
+            called.set(true);
             record_usage(ctx, api::SERVICE, 1);
             None
         }
@@ -265,9 +268,12 @@ fn metadata(video_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome
         };
         (id, ())
     };
+    let called = std::cell::Cell::new(false);
     let channel = link_metadata(&KIND, ctx, &mut out, resolve, |ctx, id, ()| {
-        ensure_metadata_note(ctx, id)
+        ensure_metadata_note(ctx, id, &called)
     })?;
+    // A YouTube API answer: a real attempt (plan intake-stage-jobs WP-3, the breaker credit).
+    out.attempted = called.get();
     if let Some(c) = channel.flatten() {
         out.vars.insert("channel_id".to_owned(), c.into());
     }
@@ -351,11 +357,26 @@ fn channel_enrich(
         about_path: None,
     });
     let created = ctx.vars.get("created") == Some(&Value::Bool(true));
-    if !ctx.config.pipelines().youtube.channel_enrich || !(force || created) {
+    // Plan intake-stage-jobs WP-3: as the `yt_metadata` stage body the step acts whenever the
+    // stage's channel fact ([`channel_step_pending`]) can say pending — the channel resolved from
+    // the linked metadata note, whether or not this run created it. Elsewhere: today's trigger.
+    let stage_channel = if super::stage_record::runs_as(ctx, cv_ingest::stage::Stage::YtMetadata) {
+        stage_linked_channel(ctx)?
+    } else {
+        None
+    };
+    if !ctx.config.pipelines().youtube.channel_enrich
+        || !(force || created || stage_channel.is_some())
+    {
         return Ok(out);
     }
     let tpl = channel_id.unwrap_or("{vars.channel_id}");
-    let channel_id = expand(ctx, tpl)?.trim().to_owned();
+    let mut channel_id = expand(ctx, tpl)?.trim().to_owned();
+    if channel_id.is_empty()
+        && let Some(c) = stage_channel
+    {
+        channel_id = c;
+    }
     if channel_id.is_empty() || channel_id.contains('/') {
         return Ok(out);
     }
@@ -375,6 +396,7 @@ fn channel_enrich(
     let c = client()?;
     let items = block_on(youtube().channels(c, &key, &[channel_id.as_str()]))?
         .map_err(|e| StepError::from_fetch(&e))?;
+    out.attempted = true;
     record_usage(ctx, api::SERVICE, 1);
     let ch = items
         .into_iter()
@@ -411,6 +433,27 @@ fn channel_enrich(
     Ok(out)
 }
 
+/// The channel the run's note links, read as [`channel_step_pending`] reads it: the previous
+/// step's `metadata_path`, else the active note's `yt-metadata` links.
+fn stage_linked_channel(ctx: &StepCtx<'_>) -> Result<Option<String>, StepError> {
+    if let Some(p) = ctx.vars.get("metadata_path").and_then(Value::as_str)
+        && let Some(c) = linked_channel(ctx.vault_root, p)
+    {
+        return Ok(Some(c));
+    }
+    let Some(path) = ctx.context.active_path.clone() else {
+        return Ok(None);
+    };
+    let Some((bytes, _)) = ctx.read(&path)? else {
+        return Ok(None);
+    };
+    let doc = FrontmatterDoc::new(String::from_utf8_lossy(&bytes).into_owned());
+    Ok(doc
+        .get_texts("yt-metadata")
+        .iter()
+        .find_map(|l| linked_channel(ctx.vault_root, l)))
+}
+
 /// The YtMetadata stage's channel fact (plan intake-stage-jobs WP-2), read without writing:
 /// `pipelines.toml` `[youtube] channel_enrich` is on, the note's `yt-metadata` link (`link`)
 /// resolves to a metadata note under `vault_root` naming a channel, and no channel about note for
@@ -421,10 +464,24 @@ pub(crate) fn channel_step_pending(
     vault_root: &std::path::Path,
     link: &str,
 ) -> bool {
-    let yt = &config.pipelines().youtube;
-    if !yt.channel_enrich {
+    if !config.pipelines().youtube.channel_enrich {
         return false;
     }
+    let Some(channel) = linked_channel(vault_root, link) else {
+        return false;
+    };
+    let root = config.pipelines().youtube.metadata_root();
+    !super::util::child_dirs(vault_root, root).iter().any(|d| {
+        std::fs::read_to_string(vault_root.join(format!("{root}/{d}/about.md"))).is_ok_and(|t| {
+            str_prop(FrontmatterDoc::new(t).get("channelId").ok().flatten()).as_deref()
+                == Some(channel.as_str())
+        })
+    })
+}
+
+/// The channel id the metadata note behind `link` (a `yt-metadata` value) names; `None` when the
+/// link is blank, the note unreadable, or it names no channel (a tombstone).
+pub(crate) fn linked_channel(vault_root: &std::path::Path, link: &str) -> Option<String> {
     let target = link
         .trim()
         .trim_start_matches("[[")
@@ -434,28 +491,18 @@ pub(crate) fn channel_step_pending(
         .unwrap_or_default()
         .trim();
     if target.is_empty() {
-        return false;
+        return None;
     }
     let rel = if target.ends_with(".md") {
         target.to_owned()
     } else {
         format!("{target}.md")
     };
-    let Ok(text) = std::fs::read_to_string(vault_root.join(&rel)) else {
-        return false;
-    };
-    let Some(channel) = str_prop(FrontmatterDoc::new(text).get("channelId").ok().flatten())
-        .filter(|c| !c.trim().is_empty())
-    else {
-        return false;
-    };
-    let root = yt.metadata_root();
-    !super::util::child_dirs(vault_root, root).iter().any(|d| {
-        std::fs::read_to_string(vault_root.join(format!("{root}/{d}/about.md"))).is_ok_and(|t| {
-            str_prop(FrontmatterDoc::new(t).get("channelId").ok().flatten()).as_deref()
-                == Some(channel.as_str())
-        })
-    })
+    let text = std::fs::read_to_string(vault_root.join(&rel)).ok()?;
+    // A channel id the step cannot act on (`/`) is not pending either: fact and step agree.
+    str_prop(FrontmatterDoc::new(text).get("channelId").ok().flatten())
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty() && !c.contains('/'))
 }
 
 /// `findExistingChannelAboutNote` + `channelAboutAgeMs`: `(path, age in whole days)`.

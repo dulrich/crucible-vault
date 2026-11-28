@@ -134,6 +134,10 @@ async fn success_writes_once_with_enriched_and_a_folded_cta() {
     assert_eq!(mock.requests().len(), 1);
     assert_eq!(var(&o, "enriched"), json!(true));
     assert_eq!(var(&o, "anchors_resolved"), json!(1));
+    assert!(
+        o.attempted,
+        "a model answer is an attempt (intake-stage-jobs WP-3)"
+    );
     assert_eq!(var(&o, "anchors_dropped"), json!(0));
     assert_eq!(var(&o, "lines_folded"), json!(1));
     assert_eq!(var(&o, "top_block"), Value::Null);

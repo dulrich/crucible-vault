@@ -314,7 +314,8 @@ pub(crate) fn filing_pending(config: &ConfigSet, path: &str, text: &str) -> bool
         return true;
     }
     let doc = FrontmatterDoc::new(text);
-    let Ok((Some(kind), _)) = kind_rules_of(config, &clip_of(&doc), doc.body()) else {
+    // Read-only and evaluated per facts read: an undefined serial kind logs at debug only.
+    let Ok((Some(kind), _)) = kind_rules_of(config, &clip_of(&doc), doc.body(), true) else {
         return false;
     };
     let Ok(def) = kind_def(config, &kind) else {
@@ -556,17 +557,19 @@ fn kind_rules(
     clip: &Clip,
     body: &str,
 ) -> Result<(Option<String>, Option<String>), StepError> {
-    kind_rules_of(ctx.config, clip, body)
+    kind_rules_of(ctx.config, clip, body, false)
 }
 
-/// [`kind_rules`] over the config alone (it reads nothing else).
+/// [`kind_rules`] over the config alone (it reads nothing else); `quiet` logs an undefined serial
+/// kind at debug instead of warning (the read-only facts path).
 fn kind_rules_of(
     config: &ConfigSet,
     clip: &Clip,
     body: &str,
+    quiet: bool,
 ) -> Result<(Option<String>, Option<String>), StepError> {
     let sources: &SourcesConfig = config.sources();
-    if let Some((kind, p)) = record_kind(sources, clip, |k| kind_def(config, k).is_ok()) {
+    if let Some((kind, p)) = record_kind(sources, clip, |k| kind_def(config, k).is_ok(), quiet) {
         let publication = Some(p.publication().trim().to_owned()).filter(|p| !p.is_empty());
         return Ok((Some(kind), publication));
     }
@@ -583,10 +586,12 @@ fn kind_rules_of(
 /// The first record of [`SourcesConfig::matches`] for the clip that gives a kind, with that kind:
 /// a host match files as [`Publication::kind_or_blog`]; a prefix or author match needs a `kind`
 /// that `is_kind`, else it is skipped with a warning (never coerced).
+/// `quiet` logs a skipped row at debug instead of warning (the read-only facts path).
 pub(in crate::steps) fn record_kind<'a>(
     sources: &'a SourcesConfig,
     clip: &Clip,
     is_kind: impl Fn(&str) -> bool,
+    quiet: bool,
 ) -> Option<(String, &'a Publication)> {
     let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
     sources
@@ -598,7 +603,11 @@ pub(in crate::steps) fn record_kind<'a>(
                 if is_kind(kind) {
                     Some((kind.to_owned(), p))
                 } else {
-                    tracing::warn!(serial = %p.name, %kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
+                    if quiet {
+                        tracing::debug!(serial = %p.name, %kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
+                    } else {
+                        tracing::warn!(serial = %p.name, %kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
+                    }
                     None
                 }
             }

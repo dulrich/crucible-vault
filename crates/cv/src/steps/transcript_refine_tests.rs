@@ -166,6 +166,10 @@ async fn single_chunk_refine_replaces_only_the_section_and_keeps_a_raw_copy() {
     assert!(!reqs[0].body_str().contains(DESC));
     assert_eq!(var(&o, "chunks"), json!(1));
     assert_eq!(var(&o, "headings"), json!(1));
+    assert!(
+        o.attempted,
+        "a model answer is an attempt (intake-stage-jobs WP-3)"
+    );
     assert_eq!(
         var(&o, "words_in"),
         json!(cv_ingest::transcript::words(RAW))

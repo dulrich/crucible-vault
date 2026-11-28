@@ -167,6 +167,10 @@ fn creates_links_after_video_id_counts_usage_then_rerun_is_a_noop() {
     );
     let o = meta(&w, "n/a.md").unwrap();
     let path = "_yt_metadata/synth-channel/dQw4w9WgXcQ.md";
+    assert!(
+        o.attempted,
+        "a Data API answer is an attempt (intake-stage-jobs WP-3)"
+    );
     assert_eq!(o.vars["metadata_path"], json!(path));
     assert_eq!(o.vars["created"], json!(true));
     assert_eq!(o.vars["linked"], json!(true));
@@ -195,6 +199,7 @@ fn creates_links_after_video_id_counts_usage_then_rerun_is_a_noop() {
     let o = meta(&w, "n/a.md").unwrap();
     assert_eq!(o.vars["linked"], json!(false));
     assert!(o.output_paths.is_empty());
+    assert!(!o.attempted, "found note: no call, no attempt");
     assert_eq!(w.http.hits(), 1);
     assert_eq!(read(&w, "n/a.md"), before);
 }
@@ -516,4 +521,46 @@ fn example_clip_enrich_yt_metadata_step_links_youtube_and_skips_others() {
     run(&w, &s, Some("n/plain.md"), &Map::new()).unwrap();
     assert_eq!(read(&w, "n/plain.md"), plain);
     assert_eq!(w.http.hits(), hits, "no API call for a non-YouTube note");
+}
+
+/// Plan intake-stage-jobs WP-3 (pin 7): as the `yt_metadata` stage body the channel step acts
+/// whenever the stage's channel fact says pending — here the metadata note already existed (no
+/// `created` var) and the channel's about note is missing: the stage run creates it (a real
+/// attempt) and the fact reads not pending, so YtMetadata reads done. Outside a stage action the
+/// step keeps today's trigger (no call).
+#[test]
+fn stage_channel_step_converges_on_a_pre_existing_metadata_note() {
+    let on = "[youtube]\nchannel_enrich = true\n";
+    let link = "[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]";
+    let clip = format!(
+        "---\nsource: https://www.youtube.com/watch?v=dQw4w9WgXcQ\nyt-metadata: \"{link}\"\n---\nBody\n"
+    );
+    let files = [
+        ("Clips/v.md", clip.as_str()),
+        (
+            "_yt_metadata/synth-channel/dQw4w9WgXcQ.md",
+            "---\nyt-video-id: dQw4w9WgXcQ\nchannelId: UCsynth\n---\n",
+        ),
+    ];
+    let mut w = world(&files, vec![("/channels", 200, CHANNEL.into())], on);
+    let s = step("yt_channel_enrich", "");
+    let pending =
+        |w: &World| crate::steps::youtube::channel_step_pending(&w.config, &w.vault, link);
+    assert!(pending(&w));
+    // Not a stage body: today's trigger (`created` unset) → no call.
+    let o = run(&w, &s, Some("Clips/v.md"), &Map::new()).unwrap();
+    assert_eq!(o.vars["enriched"], json!(false));
+    assert!(!o.attempted);
+    assert_eq!(w.http.hits(), 0);
+    // The stage body resolves the channel from the linked metadata note.
+    w.env.action.stage = Some("yt_metadata".into());
+    let o = run(&w, &s, Some("Clips/v.md"), &Map::new()).unwrap();
+    assert_eq!(o.vars["enriched"], json!(true));
+    assert!(o.attempted, "a real API answer is an attempt");
+    assert_eq!(w.http.hits(), 1);
+    assert!(!pending(&w), "the YtMetadata channel fact now reads done");
+    // Converged: a second stage run makes no call.
+    let o = run(&w, &s, Some("Clips/v.md"), &Map::new()).unwrap();
+    assert!(!o.attempted);
+    assert_eq!(w.http.hits(), 1);
 }

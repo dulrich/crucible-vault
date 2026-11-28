@@ -215,6 +215,10 @@ async fn describes_then_skips_recorded() {
         .unwrap();
     assert_eq!(var(&out, "described"), 1);
     let r = rec(&e, MD5_A).unwrap();
+    assert!(
+        out.attempted,
+        "a vision answer is an attempt (intake-stage-jobs WP-3)"
+    );
     assert_eq!(
         (r.kind.as_str(), r.narrative.as_str()),
         ("vision", "A bar chart.")

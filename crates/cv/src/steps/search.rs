@@ -269,7 +269,10 @@ pub(crate) fn run(
         embedding_mismatch = report.counts.embedding_mismatch,
         "search feed step done"
     );
-    Ok(vars(&report, live))
+    let mut out = vars(&report, live);
+    // A real embed call (plan intake-stage-jobs WP-3, the breaker credit).
+    out.attempted = live && report.embedded > 0;
+    Ok(out)
 }
 
 /// Vault read used by [`NotePrep`]: the bytes of a vault-relative path, `None` when absent.

@@ -314,6 +314,9 @@ pub struct RunSummary {
     /// A step run in this claim reported a real provider attempt (replayed checkpoints never
     /// count; plan intake-stage-jobs WP-1).
     pub attempted: bool,
+    /// The step that failed the run is a stage body of the action's stage, so it recorded the
+    /// failure itself (plan intake-stage-jobs WP-3; the settle site does not record it again).
+    pub stage_recorded: bool,
 }
 
 /// Runner construction parameters.

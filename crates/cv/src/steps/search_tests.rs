@@ -220,6 +220,10 @@ fn live_round_trip_skips_unchanged_and_fails_on_space_drift() {
     assert_eq!(var(&o, "missing_index"), 1);
     assert_eq!(var(&o, "upserted"), 1);
     assert_eq!(var(&o, "chunks"), 2);
+    assert!(
+        o.attempted,
+        "a real embed call is an attempt (intake-stage-jobs WP-3)"
+    );
     let st = w.states();
     assert_eq!(st.len(), 1);
     assert_eq!((st[0].0.as_str(), st[0].2, st[0].3), ("notes/a.md", 2, 2));
@@ -237,6 +241,7 @@ fn live_round_trip_skips_unchanged_and_fails_on_space_drift() {
     assert_eq!(var(&o, "matched"), 1);
     assert_eq!(var(&o, "upserted"), 0);
     assert_eq!(w.fake.embed_calls(), calls);
+    assert!(!o.attempted, "no embed call, no attempt");
     // Lexical-only and unchanged → matched too.
     let o = w.run(&w.upsert(""), Some("notes/a.md")).unwrap();
     assert_eq!(var(&o, "matched"), 1);

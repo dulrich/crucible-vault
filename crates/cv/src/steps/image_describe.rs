@@ -608,6 +608,8 @@ pub(crate) fn run(
 
     let mut out = StepOutcome::default();
     out.set_vars(&n);
+    // A provider call answered (plan intake-stage-jobs WP-3, the breaker credit).
+    out.attempted = n.described > 0 || n.failed > 0;
     Ok(out)
 }
 

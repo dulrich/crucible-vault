@@ -113,6 +113,9 @@ pub(crate) mod review_note;
 pub mod search;
 #[cfg(test)]
 mod search_tests;
+pub(crate) mod stage_record;
+#[cfg(test)]
+mod stage_record_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod tidy;
@@ -731,8 +734,15 @@ macro_rules! step_modules {
             }
         }
 
-        /// Executes one step (the production [`crate::runner::StepExecutor`]).
+        /// Executes one step (the production [`crate::runner::StepExecutor`]); a stage body
+        /// records its stage outcome afterwards ([`stage_record`], plan intake-stage-jobs WP-3).
         pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+            let r = dispatch(step, ctx);
+            stage_record::after_step(step, ctx, &r);
+            r
+        }
+
+        fn dispatch(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             match step.kind {
                 $(StepKind::$kind => {
                     let p = <$m>::parse(step.kind, &step.params, ctx.config)

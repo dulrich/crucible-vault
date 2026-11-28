@@ -128,8 +128,20 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
     if let Some(e) = &vars.throttle {
         return Err(StepError::from_fetch(e));
     }
+    // Plan intake-stage-jobs WP-3: as the `localize` stage body, a connection or timeout failure
+    // is an outage, not unfinished work: what landed stays, and the step defers under the
+    // download key (no outcome row, never counted toward the cap). Every other caller keeps the
+    // fold-and-return behaviour below.
+    if vars.transient > 0 && super::stage_record::runs_as(ctx, cv_ingest::stage::Stage::Localize) {
+        return Err(StepError::Deferred {
+            retry_after_ms: super::TRANSIENT_BASE_MS,
+            service: Some(SERVICE.to_owned()),
+            cause: super::DeferCause::Transient(cv_state::ServiceFailureKind::Refused),
+        });
+    }
     let mut out = StepOutcome {
         output_paths,
+        attempted: vars.responded,
         ..StepOutcome::default()
     };
     out.set_vars(&vars);
@@ -154,6 +166,10 @@ pub(super) struct NoteVars {
     /// (plan remote-media-sprint audit B1).
     #[serde(skip)]
     pub(super) transient: u64,
+    /// At least one remote download got a response (not a var): a real attempt of the
+    /// service (plan intake-stage-jobs WP-3).
+    #[serde(skip)]
+    pub(super) responded: bool,
 }
 
 /// The download/rewrite counts of a localized `.md` note.
@@ -414,6 +430,7 @@ pub(super) fn execute_note(
         throttle: run.counts.first_throttle.take(),
         all_unreachable,
         transient: run.counts.transient,
+        responded: run.counts.remote_attempts > run.counts.unreachable + run.counts.throttled,
     };
     Ok((vars, output_paths))
 }

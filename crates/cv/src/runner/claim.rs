@@ -76,6 +76,42 @@ impl Inner {
         }
     }
 
+    /// Settle-site recording (plan intake-stage-jobs WP-3): a seam job that failed terminally
+    /// outside its steps' own recording (bad params, a disarmed action, a panic, a failing step
+    /// that is not a body of the stage) records `failed` against the job's stage. Never for a
+    /// deferral, a cancel, a service outage, or a failure its stage body already recorded.
+    fn record_seam_failure(
+        &self,
+        config: &ConfigSet,
+        action_id: &str,
+        context: &ActionContext,
+        result: &JobResult,
+        summary: &RunSummary,
+    ) {
+        let JobResult::Failed { error, reason } = result else {
+            return;
+        };
+        if summary.stage_recorded || matches!(reason, Some(cv_state::FailureReason::ServiceOutage))
+        {
+            return;
+        }
+        let stage = config
+            .action(action_id)
+            .and_then(crate::steps::stage_record::action_stage)
+            .or_else(|| cv_ingest::stage::Stage::for_action(action_id));
+        let Some(stage) = stage else {
+            return;
+        };
+        let env = crate::steps::stage_record::Env {
+            state: &self.state,
+            vault: &self.vault_root,
+            index_db: &self.index_db,
+            search_db: Some(self.search.path()),
+            config,
+        };
+        crate::steps::stage_record::record_settle_failure(&env, context, stage, error);
+    }
+
     /// Settles `job` with `result` and its breaker update in one state.db transaction.
     /// `credit` = a `Done` may count as a breaker success (always for an ordinary job; for a seam
     /// job only when a step made a real attempt in this claim).
@@ -264,6 +300,13 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
         inner.publish(&id, JobState::Pending, None, Vec::new(), None, None);
         return;
     }
+    // Plan intake-stage-jobs WP-3: a seam job's action and note, for settle-site recording.
+    let seam_config = Arc::clone(&config);
+    let seam = parsed
+        .as_ref()
+        .ok()
+        .filter(|_| stage)
+        .map(|jp| (jp.action_id.clone(), jp.context.clone()));
     let (result, summary) = match parsed {
         Err(e) => (
             failed(format!("bad job params: {e}")),
@@ -302,6 +345,9 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
         },
     };
     let (result, failure) = Inner::apply_service_policy(&job, stage, result, summary.defer_cause);
+    if let Some((action_id, context)) = &seam {
+        inner.record_seam_failure(&seam_config, action_id, context, &result, &summary);
+    }
     inner.settle(&job, &result, failure.as_ref(), !stage || summary.attempted);
     // Dropping the entry releases its permit.
     let hold = lock(&inner.running).remove(&id).and_then(|j| j.hold);

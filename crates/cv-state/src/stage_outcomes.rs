@@ -6,8 +6,8 @@
 //! WP-2, D40). The stage and outcome names are `cv_ingest::stage`'s strings, stored as written; this
 //! crate does not depend on `cv-ingest`. Rows go when the note id is retired
 //! (`note_ids::retire_row`, same transaction); a reset is [`StateDb::clear_stage_outcomes`]. The
-//! `outcome` column is text, so `unfinished` needed no schema change. Nothing writes them yet (plan
-//! `intake-stage-jobs` WP-3).
+//! `outcome` column is text, so `unfinished` needed no schema change. The stage steps write them
+//! (the `cv` binary's `steps::stage_record`, plan `intake-stage-jobs` WP-3).
 //!
 //! `learned_hosts`: a publication host proved by a tracker observation, owned by the first
 //! publication that proved it (the host is the key). Minimal accessors; plan `intake-foundations`

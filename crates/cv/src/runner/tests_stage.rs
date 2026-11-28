@@ -669,3 +669,42 @@ async fn model_guard_skips_a_done_stage_and_runs_a_pending_one() {
     assert_eq!(f.claim_run().await.as_deref(), Some(todo.as_str()));
     assert_eq!(calls.load(Ordering::SeqCst), 1, "a pending stage runs");
 }
+
+/// Plan intake-stage-jobs WP-3, settle-site recording: a seam job that fails in a step that is
+/// not a body of its stage records `failed` against the stage where the job settles; a failure
+/// of a stage-body step is the step's own recording and is not recorded again at settle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seam_failure_outside_the_stage_body_is_recorded_at_settle() {
+    let failing: Arc<dyn StepExecutor> =
+        Arc::new(FnExec(Box::new(|_, _| Err(StepError::failed("boom")))));
+    for (step, recorded) in [("set_props", true), (LOC, false)] {
+        let f = fx(Arc::clone(&failing), step);
+        let full = f.dir.path().join("Blog/todo.md");
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(
+            full,
+            "---\npost-id: https://b.example/t\n---\n![](https://img.example/p.png)\n",
+        )
+        .unwrap();
+        drop(cv_index::Index::create(f.dir.path(), &f.dir.path().join("index.db")).unwrap());
+        let id = i64::try_from(f.bind("Blog/todo.md").0).unwrap();
+        let job = id_of(&f.admit("stage-x", "Blog/todo.md"));
+        assert_eq!(f.claim_run().await.as_deref(), Some(job.as_str()));
+        assert_eq!(f.job(&job).status, DbStatus::Failed);
+        let rows = f.state.lock().unwrap().stage_outcomes(id).unwrap();
+        if recorded {
+            assert_eq!(rows.len(), 1, "{step}");
+            assert_eq!(
+                (
+                    rows[0].stage.as_str(),
+                    rows[0].outcome.as_str(),
+                    rows[0].attempts
+                ),
+                ("localize", "failed", 1)
+            );
+            assert!(rows[0].reason.contains("boom"), "{}", rows[0].reason);
+        } else {
+            assert!(rows.is_empty(), "{step}: the body step owns its recording");
+        }
+    }
+}
