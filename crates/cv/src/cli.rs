@@ -21,8 +21,9 @@ pub fn usage() -> String {
     USAGE_TEMPLATE.replace(
         "{JOBS}",
         &format!(
-            "{}{}{}",
+            "{}{}{}{}",
             crate::jobs::USAGE,
+            crate::intake_pending::USAGE,
             crate::sources_cli::USAGE,
             crate::removals::USAGE
         ),

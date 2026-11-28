@@ -42,6 +42,20 @@ fn parse_accepts_and_rejects() {
         Some(Command::IntakeReconcile { dry_run: true })
     );
     assert_eq!(
+        parse(&a(&["intake", "pending"])),
+        Some(Command::IntakePending {
+            days: 30,
+            verbose: false
+        })
+    );
+    assert_eq!(
+        parse(&a(&["intake", "pending", "--verbose", "--days", "7"])),
+        Some(Command::IntakePending {
+            days: 7,
+            verbose: true
+        })
+    );
+    assert_eq!(
         parse(&a(&["sources", "rescan", "--dry-run"])),
         Some(Command::SourcesRescan { dry_run: true })
     );
@@ -66,6 +80,10 @@ fn parse_accepts_and_rejects() {
         &["intake", "reconcile", "stray"],
         &["intake", "reconcile", "--dry-run", "x"],
         &["intake", "reconcile", "--dryrun"],
+        &["intake", "pending", "--days"],
+        &["intake", "pending", "--days", "0"],
+        &["intake", "pending", "--days", "x"],
+        &["intake", "pending", "stray"],
     ] {
         assert_eq!(parse(&a(bad)), None, "{bad:?}");
         assert_eq!(run(&a(bad)), 2, "{bad:?}");

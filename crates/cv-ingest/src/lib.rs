@@ -17,6 +17,7 @@ pub mod html;
 pub mod mail;
 pub mod rename_plan;
 pub mod signals;
+pub mod stage;
 pub mod supersede;
 pub mod tracker;
 pub mod transcript;

@@ -260,6 +260,29 @@ CREATE INDEX removal_labels_pub_key ON removal_labels(publication, line_key, ver
 DELETE FROM mail_boilerplate;
 DELETE FROM mail_boilerplate_seen;
 ",
+    // v22 (plan intake-foundations WP-1): recorded stage outcomes the note itself does not show (a
+    // skip with the fingerprint of the facts it was judged on, a failure with its attempts), keyed
+    // by note id and stage and deleted when the id is retired; and publication hosts learned from
+    // tracker observations, owned by the first publication that proved them (WP-3).
+    r"
+CREATE TABLE stage_outcomes (
+    note_id      INTEGER NOT NULL,
+    stage        TEXT NOT NULL,
+    outcome      TEXT NOT NULL,
+    reason       TEXT NOT NULL DEFAULT '',
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    fingerprint  TEXT NOT NULL DEFAULT '',
+    first_ms     INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (note_id, stage)
+);
+CREATE TABLE learned_hosts (
+    host         TEXT PRIMARY KEY,
+    publication  TEXT NOT NULL,
+    first_ms     INTEGER NOT NULL,
+    evidence     TEXT NOT NULL
+);
+",
 ];
 
 /// Highest schema version this build knows.
@@ -316,4 +339,21 @@ pub fn migrate(conn: &mut Connection) -> Result<i64> {
         tracing::info!(version = target, "state.db migrated");
     }
     current_version(conn)
+}
+
+/// Creates a database at `path` brought only up to `version` (`BASELINE_VERSION..=latest`):
+/// a fixture of an older schema for read-only consumers' tests (e.g. `cv intake pending` against
+/// a pre-v22 `state.db`). Never used by the daemon.
+pub fn create_at_version(path: &std::path::Path, version: i64) -> Result<()> {
+    check_version(version)?;
+    let steps = usize::try_from(version - BASELINE_VERSION).unwrap_or(0);
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(BASELINE)?;
+    for sql in &MIGRATIONS[..steps] {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", version)?;
+    tx.commit()?;
+    Ok(())
 }

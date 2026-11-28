@@ -17,6 +17,7 @@ mod note_ids;
 mod query;
 mod removal_labels;
 mod runner_state;
+mod stage_outcomes;
 mod store;
 mod telemetry;
 mod tracker;
@@ -36,6 +37,7 @@ pub use note_ids::NOTE_ID_RETENTION_MS;
 pub use query::{ListQuery, StatusCount};
 pub use removal_labels::{PublicationLabels, RemovalLabel};
 pub use runner_state::StepCheckpoint;
+pub use stage_outcomes::{LearnedHost, StageOutcomeRow};
 pub use store::{
     BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,
     RequeueBreakdown, RetryOutcome, StateDb, StateReader,

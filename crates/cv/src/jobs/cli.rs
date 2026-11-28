@@ -17,6 +17,11 @@ pub enum Command {
     IntakeReconcile {
         dry_run: bool,
     },
+    /// `cv intake pending [--days N] [--verbose]`: daemon-free (`crate::intake_pending`).
+    IntakePending {
+        days: u32,
+        verbose: bool,
+    },
     /// `cv sources rescan [--dry-run]`: the sources-only reconcile.
     SourcesRescan {
         dry_run: bool,
@@ -145,6 +150,18 @@ pub fn parse(args: &[String]) -> Option<Command> {
                 }
             }
             Some(Command::IntakeList(p))
+        }
+        ["intake", "pending", rest @ ..] => {
+            let (mut days, mut verbose) = (crate::intake_pending::DEFAULT_DAYS, false);
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match *a {
+                    "--verbose" => verbose = true,
+                    "--days" => days = it.next()?.parse().ok().filter(|d| *d > 0)?,
+                    _ => return None,
+                }
+            }
+            Some(Command::IntakePending { days, verbose })
         }
         ["intake", "reconcile"] => Some(Command::IntakeReconcile { dry_run: false }),
         ["intake", "reconcile", "--dry-run"] => Some(Command::IntakeReconcile { dry_run: true }),

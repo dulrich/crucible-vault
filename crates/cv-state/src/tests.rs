@@ -365,7 +365,7 @@ fn v19_database_migrates_to_v20_with_removal_labels() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("state.db");
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 21);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     let row = |verdict, line: &str| crate::RemovalLabel {
         note_id: 7,
         publication: "pub".into(),
@@ -421,7 +421,7 @@ fn v20_database_migrates_to_v21_clearing_learned_sets_and_keeping_labels() {
                     (1, 'p', '', 'delete', 'fold', 'Read online', 8, 5);",
     )
     .unwrap();
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 21);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::latest_version());
     let n = |t: &str| -> i64 {
         c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
             .unwrap()
@@ -431,8 +431,8 @@ fn v20_database_migrates_to_v21_clearing_learned_sets_and_keeping_labels() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut s = StateDb::open(&dir.path().join("state.db"), 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 21);
-    assert_eq!(migrate::latest_version(), 21);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
+    assert_eq!(migrate::latest_version(), 22);
     let row = |verdict, line: &str| crate::RemovalLabel {
         note_id: 1,
         publication: "p".into(),

@@ -47,6 +47,9 @@ pub fn run(args: &[String]) -> i32 {
         eprint!("usage:\n{USAGE}");
         return 2;
     };
+    if let Command::IntakePending { days, verbose } = cmd {
+        return crate::intake_pending::run(days, verbose);
+    }
     match Config::from_env() {
         Ok(c) => execute(&c, &cmd),
         Err(e) => {
@@ -58,6 +61,9 @@ pub fn run(args: &[String]) -> i32 {
 
 /// Runs a parsed command against the daemon on `config.socket`; returns the exit code.
 pub fn execute(config: &Config, cmd: &Command) -> i32 {
+    if let Command::IntakePending { days, verbose } = *cmd {
+        return crate::intake_pending::run(days, verbose);
+    }
     match call(config, cmd) {
         Ok(text) => {
             print!("{text}");
@@ -121,6 +127,9 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
         }
         Command::IntakeReconcile { dry_run } => reconcile(&client, *dry_run, false)?,
         Command::SourcesRescan { dry_run } => reconcile(&client, *dry_run, true)?,
+        Command::IntakePending { .. } => {
+            return Err(anyhow!("cv intake pending runs without the daemon"));
+        }
         Command::Run { action_id, note } => {
             let r = client
                 .call::<methods::RunAction>(RunActionParams {

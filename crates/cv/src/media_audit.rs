@@ -234,7 +234,7 @@ fn top_folder(rel: &str) -> &str {
 }
 
 /// Counts of one note's remote refs by kind: (images, video, audio, pdf).
-fn note_counts(text: &str) -> (u64, u64, u64, u64) {
+pub(crate) fn note_counts(text: &str) -> (u64, u64, u64, u64) {
     let (mut img, mut vid, mut aud, mut pdf) = (0_u64, 0_u64, 0_u64, 0_u64);
     let mut count = |k: EffectiveKind| match k {
         EffectiveKind::Kind(RemoteKind::Image | RemoteKind::Unknown) => img += 1,
@@ -259,7 +259,7 @@ fn note_counts(text: &str) -> (u64, u64, u64, u64) {
     (img, vid, aud, pdf)
 }
 
-fn is_image_file(rel: &str) -> bool {
+pub(crate) fn is_image_file(rel: &str) -> bool {
     rel.rsplit_once('.')
         .is_some_and(|(_, e)| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }

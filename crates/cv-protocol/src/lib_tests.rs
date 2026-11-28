@@ -1215,3 +1215,36 @@ fn removal_requests_round_trip() {
         json!({"path": null})
     );
 }
+
+/// Plan intake-foundations WP-1: the stage-state wire shape.
+#[test]
+fn note_stage_states_round_trip() {
+    let v = NoteStageStates {
+        id: Some(NoteId(7)),
+        kind: "mail".into(),
+        stages: vec![
+            NoteStage {
+                stage: "enrich".into(),
+                state: StageStateWire::Unfinished,
+            },
+            NoteStage {
+                stage: "finalize".into(),
+                state: StageStateWire::Skipped {
+                    reason: "no tracker row".into(),
+                },
+            },
+            NoteStage {
+                stage: "index".into(),
+                state: StageStateWire::Failed { attempts: 2 },
+            },
+        ],
+    };
+    assert_eq!(
+        round_trip(&v),
+        json!({"id": 7, "kind": "mail", "stages": [
+            {"stage": "enrich", "state": "unfinished"},
+            {"stage": "finalize", "state": "skipped", "reason": "no tracker row"},
+            {"stage": "index", "state": "failed", "attempts": 2},
+        ]})
+    );
+}

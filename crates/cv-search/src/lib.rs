@@ -18,7 +18,8 @@ pub use chunker::{
 };
 pub use error::SearchError;
 pub use feed::{
-    EmbedTarget, FeedConfig, FeedCounts, FeedReport, LocalNote, ReportScope, space_for,
+    EmbedTarget, FeedConfig, FeedCounts, FeedReport, IndexedHashes, LocalNote, ReportScope,
+    space_for,
 };
 pub use index::{SearchDb, SharedIndex};
 pub use prepare::{

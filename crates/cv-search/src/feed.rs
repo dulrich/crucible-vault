@@ -407,6 +407,38 @@ pub fn delete_path(index: &Mutex<Index>, path: &str) -> Result<FeedReport, Searc
     Ok(report)
 }
 
+/// The indexed source hashes of a `semsearch` file, read once (plan `intake-foundations` WP-1: the
+/// `index` stage fact). Read-only: a missing file is an empty index (never created), no embed
+/// call, no write, and no embedding-space judgement — only the hash comparison
+/// [`upsert_path`] makes through `classify`.
+#[derive(Debug, Clone, Default)]
+pub struct IndexedHashes(BTreeMap<String, String>);
+
+impl IndexedHashes {
+    /// Reads every source state of `search_db` read-only.
+    pub fn open_read_only(search_db: &Path) -> Result<Self, SearchError> {
+        match Index::open_read_only(search_db, &IndexOptions::default()) {
+            Ok(idx) => Ok(Self(
+                idx.source_states()?
+                    .into_iter()
+                    .map(|s| (s.source, s.content_hash))
+                    .collect(),
+            )),
+            Err(semsearch::Error::NotFound(_)) => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether `prepared`'s folded `content_hash` (body, image-description and linked-document
+    /// facets) equals the hash indexed for its path.
+    #[must_use]
+    pub fn is_current(&self, prepared: &PreparedFile) -> bool {
+        self.0
+            .get(&prepared.path)
+            .is_some_and(|h| *h == prepared.content_hash)
+    }
+}
+
 /// What a report-only call classifies.
 #[derive(Debug, Clone, Copy)]
 pub enum ReportScope<'a> {
@@ -508,5 +540,72 @@ mod tests {
                 .embedding_mismatch,
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod indexed_hashes_tests {
+    use super::*;
+    use crate::prepare::{LinkedSource, PrepareHost, PrepareInput, prepare_search_file};
+    use cv_state::ImageDescription;
+    use std::cell::RefCell;
+
+    struct Host(RefCell<String>);
+
+    impl PrepareHost for Host {
+        fn image_description(&self, _md5: &str) -> Option<ImageDescription> {
+            None
+        }
+        fn resolve_linked(&self, linkpath: &str, _from: &str) -> Option<LinkedSource> {
+            Some(LinkedSource {
+                path: format!("{linkpath}.md"),
+                basename: linkpath.to_owned(),
+                content: self.0.borrow().clone(),
+            })
+        }
+    }
+
+    fn input(body: &str) -> PrepareInput {
+        PrepareInput {
+            path: "n.md".into(),
+            content: body.into(),
+            embeds: Vec::new(),
+            x_metadata: None,
+            yt_metadata: Some(serde_json::json!("[[_yt_metadata/v]]")),
+        }
+    }
+
+    /// The `index` stage fact: current after an upsert; stale after a body change and after a
+    /// linked-document change; a missing file is empty and never created.
+    #[test]
+    fn follows_body_and_linked_document_changes() {
+        let dir = std::env::temp_dir().join(format!("cv-search-ih-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("search.db");
+        let _ = std::fs::remove_file(&db);
+        let host = Host(RefCell::new("channel text".into()));
+        let prepared = prepare_search_file(&host, &input("body one"));
+        assert!(
+            !IndexedHashes::open_read_only(&db)
+                .unwrap()
+                .is_current(&prepared)
+        );
+        assert!(!db.exists(), "a read-only open never creates the file");
+        {
+            let mut idx = Index::open(&db, &IndexOptions::default()).unwrap();
+            let chunks: Vec<semsearch::Chunk> =
+                build_prepared_chunks(&prepared, DEFAULT_VAULT_ID, "n", 0, 2000, 200)
+                    .into_iter()
+                    .map(to_chunk)
+                    .collect();
+            idx.upsert_source("n.md", &prepared.content_hash, &chunks)
+                .unwrap();
+        }
+        let ih = IndexedHashes::open_read_only(&db).unwrap();
+        assert!(ih.is_current(&prepared));
+        assert!(!ih.is_current(&prepare_search_file(&host, &input("body two"))));
+        *host.0.borrow_mut() = "channel text, edited".into();
+        assert!(!ih.is_current(&prepare_search_file(&host, &input("body one"))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

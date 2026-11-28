@@ -6,6 +6,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod daemon;
+pub mod intake_pending;
 pub mod jobs;
 pub mod lookup;
 pub mod media_audit;

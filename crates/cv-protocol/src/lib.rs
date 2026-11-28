@@ -12,6 +12,7 @@ mod jobs;
 pub mod methods;
 mod note;
 mod removals;
+mod stages;
 pub use enums::{
     BreakerState, ContextNeed, FailureKind, Lane, TrackerOutcome, TrashLocation, TrashReason,
 };
@@ -25,6 +26,7 @@ pub use removals::{
     NextFoldNoteParams, NextFoldNoteResult, RemovalKind, RemovalOp, RemovalOrigin, RemovalRefusal,
     RemovalVerdict, RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
 };
+pub use stages::{NoteStage, NoteStageStates, StageStateWire};
 
 /// Protocol version exchanged in `hello`; a mismatch is refused, never degraded.
 pub const PROTOCOL_VERSION: u32 = 1;

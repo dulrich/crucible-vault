@@ -45,6 +45,8 @@ fn retire_row(tx: &Transaction<'_>, id: i64, by: Option<i64>, now: i64) -> Resul
         "UPDATE note_ids SET retired_ms = ?2, replaced_by = ?3 WHERE id = ?1",
         params![id, now, by],
     )?;
+    // A retired id has no stages left to record (plan intake-foundations WP-1).
+    tx.execute("DELETE FROM stage_outcomes WHERE note_id = ?1", params![id])?;
     Ok(())
 }
 
